@@ -401,7 +401,7 @@ end # модуль CloudModel
 using .CloudModel
 
 # Запуск симуляции
-state, oX, oY, oZ = CloudModel.run_simulation(1000)
+state, oX, oY, oZ = CloudModel.run_simulation(10000)
 
 # Визуализация результатов
 CloudModel.visualize_results(state, oX, oY, oZ)

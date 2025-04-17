@@ -6,8 +6,14 @@ using GLMakie
 using LinearAlgebra
 using StaticArrays
 
-# Реэкспорт часто используемых единиц измерения для удобства
-export u"AU", u"Msun", u"K", u"yr"
+# Константы для часто используемых единиц измерения
+const AU = u"AU"
+const MSUN = u"Msun"
+const KELVIN = u"K"
+const YEAR = u"yr"
+
+# Экспорт констант
+export AU, MSUN, KELVIN, YEAR
 
 # Определения типов для лучшей организации кода
 """
@@ -169,7 +175,9 @@ function boundary_conditions!(state::SimulationState, oX, oY, oZ, M_0, constants
         for j in 1:(N+2)
             state.Phi[i, j, 1] = state.Phi[i, j, 2]  # гр. усл. Phi на z=0
             state.Rho[i, j, 1] = state.Rho[i, j, 2]  # гр. усл. Rho на z=0
-            state.Phi[i, j, N+2] = -G_ast * M_0 / sqrt(oX[i]^2 + oY[j]^2 + oZ[N+2]^2)  # гр. усл. на z=z_max
+            # Преобразуем результат в безразмерную величину
+            potential = -G_ast * M_0 / sqrt(oX[i]^2 + oY[j]^2 + oZ[N+2]^2)
+            state.Phi[i, j, N+2] = ustrip(potential)  # гр. усл. на z=z_max
         end
     end
 
@@ -177,7 +185,9 @@ function boundary_conditions!(state::SimulationState, oX, oY, oZ, M_0, constants
         for k in 1:(N+2)
             state.Phi[i, 1, k] = state.Phi[i, 2, k]  # гр. усл. Phi на y=0
             state.Rho[i, 1, k] = state.Rho[i, 2, k]  # гр. усл. Phi на y=0
-            state.Phi[i, N+2, k] = -G_ast * M_0 / sqrt(oX[i]^2 + oY[N+2]^2 + oZ[k]^2)  # гр. усл. на y=y_max
+            # Преобразуем результат в безразмерную величину
+            potential = -G_ast * M_0 / sqrt(oX[i]^2 + oY[N+2]^2 + oZ[k]^2)
+            state.Phi[i, N+2, k] = ustrip(potential)  # гр. усл. на y=y_max
         end
     end
 
@@ -185,7 +195,9 @@ function boundary_conditions!(state::SimulationState, oX, oY, oZ, M_0, constants
         for k in 1:(N+2)
             state.Phi[1, j, k] = state.Phi[2, j, k]  # гр. усл. Phi на x=0
             state.Rho[1, j, k] = state.Rho[2, j, k]  # гр. усл. Phi на x=0
-            state.Phi[N+2, j, k] = -G_ast * M_0 / sqrt(oX[N+2]^2 + oY[j]^2 + oZ[k]^2)  # гр. усл. на x=x_max
+            # Преобразуем результат в безразмерную величину
+            potential = -G_ast * M_0 / sqrt(oX[N+2]^2 + oY[j]^2 + oZ[k]^2)
+            state.Phi[N+2, j, k] = ustrip(potential)  # гр. усл. на x=x_max
         end
     end
 end
@@ -227,16 +239,21 @@ function iterations_method!(state::SimulationState, oX, oY, oZ, params::GridPara
                 k = k0 + 1
                 # Внутренние итерации для решения трансцендентного уравнения
                 for _ in 1:5
-                    f[i, j, k] = A * exp(-state.Phi[i, j, k] * B / T)
-                    state.Phi[i, j, k] = (state.Phi[i+1, j, k] + state.Phi[i-1, j, k]
-                                        + state.Phi[i, j+1, k] + state.Phi[i, j-1, k]
-                                        + state.Phi[i, j, k+1] + state.Phi[i, j, k-1]
-                                        - step^2 * f[i, j, k]) / 6.0
+                    # Удаляем единицы измерения для совместимости с массивом f
+                    B_T = ustrip(B / T)
+                    f[i, j, k] = ustrip(A) * exp(-state.Phi[i, j, k] * B_T)
+                    
+                    # Вычисляем новое значение потенциала
+                    laplacian = (state.Phi[i+1, j, k] + state.Phi[i-1, j, k]
+                               + state.Phi[i, j+1, k] + state.Phi[i, j-1, k]
+                               + state.Phi[i, j, k+1] + state.Phi[i, j, k-1])
+                    step_squared = ustrip(step^2)
+                    state.Phi[i, j, k] = (laplacian - step_squared * f[i, j, k]) / 6.0
                 end
                 
                 # Обновление плотности и массы
-                state.Rho[i, j, k] = rho_c_ast * exp(-state.Phi[i, j, k] * B / T)
-                M += 8.0 * state.Rho[i, j, k] * step^3
+                state.Rho[i, j, k] = ustrip(rho_c_ast) * exp(-state.Phi[i, j, k] * ustrip(B / T))
+                M += 8.0 * (state.Rho[i, j, k] * u"Msun/AU^3") * step^3
             end
         end
     end
@@ -327,11 +344,11 @@ function visualize_results(state::SimulationState, oX, oY, oZ; slice_dim::Int=3,
     end
     
     # Преобразование значений сетки для построения графика
-    X_plot = [ustrip(coords_x[i]) for i in 1:length(coords_x), j in 1:length(coords_y)]
-    Y_plot = [ustrip(coords_y[j]) for i in 1:length(coords_x), j in 1:length(coords_y)]
+    X_plot = [ustrip(coords_x[i]) for i in 1:length(coords_x)]
+    Y_plot = [ustrip(coords_y[j]) for j in 1:length(coords_y)]
     
     # Создание фигуры
-    fig = Figure(resolution = (900, 700), fontsize = 14)
+    fig = Figure(size = (900, 700), fontsize = 14)
     
     # Трехмерный поверхностный график
     ax1 = Axis3(fig[1, 1:2], 
@@ -340,9 +357,10 @@ function visualize_results(state::SimulationState, oX, oY, oZ; slice_dim::Int=3,
                zlabel = "Потенциал",
                title = "Гравитационный потенциал")
     
+    # Используем surface с векторами X_plot, Y_plot вместо матриц
     surface!(ax1, X_plot, Y_plot, Phi_2d,
              colormap = :viridis, 
-             shading = true,
+             shading = FastShading,
              alpha = 0.9)
     
     # Двумерная тепловая карта
@@ -351,6 +369,7 @@ function visualize_results(state::SimulationState, oX, oY, oZ; slice_dim::Int=3,
                ylabel = ylabel,
                title = "Потенциал (Вид сверху)")
     
+    # Heatmap работает с векторами для координат
     hm = heatmap!(ax2, X_plot, Y_plot, Phi_2d,
                  colormap = :viridis)
     
@@ -362,6 +381,7 @@ function visualize_results(state::SimulationState, oX, oY, oZ; slice_dim::Int=3,
                ylabel = ylabel,
                title = "Контуры потенциала")
     
+    # Contour также работает с векторами для координат
     contour!(ax3, X_plot, Y_plot, Phi_2d,
              levels = 15,
              colormap = :viridis)
@@ -381,7 +401,7 @@ end # модуль CloudModel
 using .CloudModel
 
 # Запуск симуляции
-state, oX, oY, oZ = run_simulation(1000)
+state, oX, oY, oZ = CloudModel.run_simulation(1000)
 
 # Визуализация результатов
-visualize_results(state, oX, oY, oZ)
+CloudModel.visualize_results(state, oX, oY, oZ)

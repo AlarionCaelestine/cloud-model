@@ -16,6 +16,7 @@ using iterative numerical methods.
 ## Main Functions
 
 - `run_simulation`: Run simulation with standard direct computation
+- `run_simulation_mt`: Run simulation with multithreaded computation
 - `visualize_results`: Visualize simulation results
 
 ## Examples
@@ -23,6 +24,9 @@ using iterative numerical methods.
 ```julia
 # Run with standard method
 state, oX, oY, oZ = run_simulation()
+
+# Run with multithreading
+state, oX, oY, oZ = run_simulation_mt(threads=Threads.nthreads())
 
 # Visualize results
 visualize_results(state, oX, oY, oZ)
@@ -37,62 +41,44 @@ using UnitfulAstro
 using GLMakie
 using LinearAlgebra
 using StaticArrays
+using Base.Threads: @threads, nthreads, threadid
 
-# Physical Constants with proper units
-const M = 2e27u"kg"                # Mass
-const T = 100u"K"                  # Temperature
-const T_C = 1e6u"K"                # Corona temperature
-const rho_0 = 6e-17u"kg/m^3"       # Density
-const mu = 2.35e-3u"kg/mol"        # Molar mass
-const mu_0 = 0.5e-3u"kg/mol"       # Molar mass for corona
-const G = 6.67e-11u"m^3/kg/s^2"    # Gravitational constant
-const R = 8.31u"J/mol/K"           # Gas constant
+# Fundamental constants
+const G = ustrip(6.67e-11u"m^3/kg/s^2" |> upreferred) # Gravitational constant
+const R = ustrip(8.31u"J/mol/K" |> upreferred) # Gas constant
 
-# Common unit abbreviations for convenience
-const AU = u"AU"
-const MSUN = u"Msun"
-const KELVIN = u"K"
-const YEAR = u"yr"
 
 # Export constants and types
-export AU, MSUN, KELVIN, YEAR, M, T, T_C, rho_0, mu, mu_0, G, R
-export PhysicalConstants, GridParameters, SimulationState
-export F, euler_method, runge_kutta
+export G, R
+export SimulationConstants, SimulationState
 export run_simulation, visualize_results, extract_2d_slice
 export parse_command_line
 
+
 """
-    PhysicalConstants{T}
+    SimulationConstants{T}
 
 Structure for storing physical constants used in the simulation.
 
 # Fields
-- `G::Quantity{T}`: Gravitational constant (AU^3/yr^2/Msun)
-- `R::Quantity{T}`: Gas constant (AU^3/yr^2/K/Msun)
-- `T::Quantity{T}`: Temperature (K)
-- `mu::Quantity{T}`: Average molecular mass (Msun/mol)
+- `T::Float64`: Temperature of the cloud (K)
+- `rho_0::Float64`: Density of the cloud (kg/m^3)
+- `mu::Float64`: Average molecular mass (Msun/mol)
+- `Step::Float64`: Grid step
+- `N::Int`: Number of grid points
 """
-struct PhysicalConstants{T}
-    G::Quantity{T}      # Gravitational constant (AU^3/yr^2/Msun)
-    R::Quantity{T}      # Gas constant (AU^3/yr^2/K/Msun)
-    T::Quantity{T}      # Temperature (K)
-    mu::Quantity{T}     # Average molecular mass (Msun/mol)
+struct SimulationConstants
+    T::Float64          # Temperature of the cloud (K)
+    rho_0::Float64      # Density of the cloud (kg/m^3)
+    mu::Float64         # Average molecular mass (Msun/mol)
+    Step::Float64       # Grid step
+    N::Int              # Number of grid points
+    distance_to_center::Array{Float64, 3} # Distance to the center of the cloud
 end
 
-"""
-    GridParameters{T}
-
-Structure for storing grid parameters used in the simulation.
-
-# Fields
-- `x_max::Quantity{T}`: Maximum x-coordinate
-- `N::Int`: Number of grid points
-- `step::Quantity{T}`: Grid step
-"""
-struct GridParameters{T}
-    x_max::Quantity{T}  # Maximum x-coordinate
-    N::Int              # Number of grid points
-    step::Quantity{T}   # Grid step
+function SimulationConstants(T::Float64, rho_0::Float64, mu::Float64, Step::Float64, N::Int)
+    distance_to_center = [sqrt((i - 1.5)^2 + (j-1.5)^2 + (k-1.5)^2) * Step for i in 1:(N+2), j in 1:(N+2), k in 1:(N+2)]
+    return SimulationConstants(T, rho_0, mu, Step, N, distance_to_center)
 end
 
 """
@@ -100,173 +86,23 @@ end
 
 Structure for storing the current state of the simulation.
 
+This structure holds the gravitational potential and density fields, along with grid parameters.
+It is used throughout the simulation to track the evolving state of the cloud model.
+We will update the state of the simulation for 2:N+1 indices, while the first and last indices are the boundary conditions.
+
 # Fields
-- `Phi::Array{T, 3}`: Gravitational potential
-- `Rho::Array{T, 3}`: Density
-- `M::Quantity{Float64}`: Mass
+- `Phi::Array{Float64, 3}`: Gravitational potential
+- `Rho::Array{Float64, 3}`: Density
+- `M::Float64`: Mass of the cloud (kg)
 """
-mutable struct SimulationState{T}
-    Phi::Array{T, 3}    # Gravitational potential
-    Rho::Array{T, 3}    # Density
-    M::Quantity{Float64}      # Mass
+mutable struct SimulationState
+    Phi::Array{Float64, 3}  # Gravitational potential
+    Rho::Array{Float64, 3}  # Density
+    M::Float64              # Mass of the cloud (kg)
 end
 
 """
-    F(X, Y, Z)
-
-Calculate derivatives for the differential equation.
-
-# Arguments
-- `X::Real`: X coordinate
-- `Y::Real`: Y value
-- `Z::Real`: Z value
-
-# Returns
-- `Tuple{Float64, Float64}`: Pair of derivatives (Fy, Fz)
-"""
-function F(X::Real, Y::Real, Z::Real)
-    Fy = X != 0 ? Z / X^2 : 0.0
-    Fz = X^2 * exp(-Y)
-    return Fy, Fz
-end
-
-"""
-    euler_method(step, X, Y, Z)
-
-Numerical integration using Euler method.
-
-# Arguments
-- `step::Real`: Integration step size
-- `X::Real`: X coordinate
-- `Y::Real`: Y value
-- `Z::Real`: Z value
-
-# Returns
-- `Tuple{Float64, Float64}`: Updated values (Y_new, Z_new)
-"""
-function euler_method(step::Real, X::Real, Y::Real, Z::Real)
-    Fy, Fz = F(X, Y, Z)
-    Z_new = Z + step * Fz
-    Y_new = Y + step * Fy
-    return Y_new, Z_new
-end
-
-"""
-    runge_kutta(step, X, Y, Z)
-
-Numerical integration using 4th order Runge-Kutta method.
-
-# Arguments
-- `step::Real`: Integration step size
-- `X::Real`: X coordinate
-- `Y::Real`: Y value
-- `Z::Real`: Z value
-
-# Returns
-- `Tuple{Float64, Float64}`: Updated values (Y_new, Z_new)
-"""
-function runge_kutta(step::Real, X::Real, Y::Real, Z::Real)
-    k1_y, k1_z = F(X, Y, Z)
-    k2_y, k2_z = F(X + step/2, Y + k1_y*step/2, Z + k1_z*step/2)
-    k3_y, k3_z = F(X + step/2, Y + k2_y*step/2, Z + k2_z*step/2)
-    k4_y, k4_z = F(X + step, Y + k3_y*step, Z + k3_z*step)
-
-    Z_new = Z + step/6 * (k1_z + 2*k2_z + 2*k3_z + k4_z)
-    Y_new = Y + step/6 * (k1_y + 2*k2_y + 2*k3_y + k4_y)
-    return Y_new, Z_new
-end
-
-"""
-    initialize_physical_constants()
-
-Initialize physical constants for the simulation, converting to astronomical units.
-
-# Returns
-- `PhysicalConstants`: Initialized physical constants
-"""
-function initialize_physical_constants()
-    # Convert gravitational constant to astronomical units
-    G_ast = 4π^2 * u"AU^3/yr^2/Msun"
-    
-    # Convert gas constant - avoid direct conversion which causes a DimensionError
-    # Instead, calculate R_ast more carefully
-    # Original: R_ast = uconvert(u"AU^3/yr^2/K/Msun", R * u"yr^2" / (u"AU^2" * u"Msun"))
-    
-    # Create a value that is dimensionally equivalent to what we need
-    # R = 8.31 J/(mol·K) = 8.31 kg·m²/(s²·mol·K)
-    # We want AU³/(yr²·Msun·K)
-    
-    # First convert to base units
-    R_base = ustrip(uconvert(u"kg*m^2/s^2/mol/K", R))
-    
-    # Calculate conversion factors
-    m_per_AU = ustrip(uconvert(u"m", 1.0u"AU"))
-    kg_per_Msun = ustrip(uconvert(u"kg", 1.0u"Msun"))
-    s_per_yr = ustrip(uconvert(u"s", 1.0u"yr"))
-    
-    # Compute the value in the desired units
-    R_ast_value = R_base * (m_per_AU^2 / kg_per_Msun) * (s_per_yr^2)
-    
-    # Create the quantity with the correct units
-    R_ast = R_ast_value * u"AU^3/yr^2/K/Msun"
-    
-    T_ast = T
-    
-    # Fix mu_ast conversion similar to R_ast
-    # mu = 2.35e-3 kg/mol
-    # We want Msun
-    mu_base = ustrip(uconvert(u"kg/mol", mu))
-    
-    # Convert to solar masses per mol
-    mu_ast_value = mu_base / kg_per_Msun
-    mu_ast = mu_ast_value * u"Msun/mol"
-    
-    return PhysicalConstants{Float64}(G_ast, R_ast, T_ast, mu_ast)
-end
-
-"""
-    initialize_grid(x_max, N)
-
-Initialize grid parameters for the simulation.
-
-# Arguments
-- `x_max::Quantity{Float64}`: Maximum grid coordinate
-- `N::Int`: Number of grid points
-
-# Returns
-- `GridParameters`: Initialized grid parameters
-"""
-function initialize_grid(x_max::Quantity{Float64}, N::Int)
-    step = x_max / N
-    return GridParameters{Float64}(x_max, N, step)
-end
-
-"""
-    create_grid(params)
-
-Create a three-dimensional coordinate grid based on grid parameters.
-
-# Arguments
-- `params::GridParameters`: Grid parameters
-
-# Returns
-- `Tuple{Vector, Vector, Vector}`: X, Y, Z coordinate arrays
-"""
-function create_grid(params::GridParameters{T}) where T
-    # Create one-dimensional coordinate arrays
-    N = params.N
-    step = params.step
-    
-    # Create arrays with appropriate units
-    oX = [(n-1) * step - step/2 for n in 1:(N+2)]
-    oY = [(n-1) * step - step/2 for n in 1:(N+2)]
-    oZ = [(n-1) * step - step/2 for n in 1:(N+2)]
-    
-    return oX, oY, oZ
-end
-
-"""
-    initialize_simulation_state(params::GridParameters{T}) where T
+    initialize_simulation_state(size::Float64, N::Int, constants::SimulationConstants)
 
 Initialize the simulation state with default values.
 
@@ -276,162 +112,101 @@ Initialize the simulation state with default values.
 # Returns
 - `SimulationState`: Initialized simulation state
 """
-function initialize_simulation_state(params::GridParameters{T}) where T
-    N = params.N
-    
+function initialize_simulation_state(size::Float64, constants::SimulationConstants)
     # Initialize arrays
-    Phi = zeros(N+2, N+2, N+2)
-    Rho = zeros(N+2, N+2, N+2)
-    
-    # Set initial conditions for potential
-    for i in 1:(N+2)
-        for j in 1:(N+2)
-            for k in 1:(N+2)
-                Phi[i, j, k] = -1.0e-5
+    Step = size / constants.N # size is the size of the grid, N is the number of grid points. There is a point to the left and right of the grid points, which are the boundary conditions.
+    Phi = fill(0.0, constants.N+2, constants.N+2, constants.N+2)
+    Rho = fill(constants.rho_0, constants.N+2, constants.N+2, constants.N+2)
+
+    M = constants.rho_0 * size^3 * 8 # 8 is the number of octants in the grid
+    Rho[1:end-1, 1:end-1, 1:end-1] .= constants.rho_0 # Set the density of the cloud to the average density
+    for i in 1:(constants.N+2)
+        for j in 1:(constants.N+2)
+            for k in 1:(constants.N+2)
+                Phi[i, j, k] = -G * M / constants.distance_to_center[i, j, k]
             end
         end
     end
     
-    # Set initial centrally peaked density with stronger gradient
-    center = div(N, 2) + 1
-    for i in 1:(N+2)
-        for j in 1:(N+2)
-            for k in 1:(N+2)
-                # Distance from center
-                r = sqrt((i-center)^2 + (j-center)^2 + (k-center)^2)
-                # Steeper gaussian-like profile
-                Rho[i, j, k] = exp(-r^2 / (N/8)^2)
-            end
-        end
-    end
-    
-    # Create additional density structures to demonstrate visualization
-    # Add a denser region in one quadrant
-    quad_center_i = div(3*N, 4) + 1
-    quad_center_j = div(3*N, 4) + 1
-    quad_center_k = div(3*N, 4) + 1
-    
-    for i in 1:(N+2)
-        for j in 1:(N+2)
-            for k in 1:(N+2)
-                # Distance from quadrant center
-                r_quad = sqrt((i-quad_center_i)^2 + (j-quad_center_j)^2 + (k-quad_center_k)^2)
-                # Add second structure
-                if r_quad < N/4
-                    Rho[i, j, k] += 0.8 * exp(-r_quad^2 / (N/10)^2)
-                end
-            end
-        end
-    end
-    
-    # Initialize mass
-    M = 1.0 * u"Msun"
-    
-    return SimulationState{T}(Phi, Rho, M)
+    return SimulationState(Phi, Rho, M)
 end
 
 """
-    boundary_conditions!(state, oX, oY, oZ, M_0, constants)
+    boundary_conditions!(state)
 
-Apply boundary conditions to the simulation state.
+Apply boundary conditions to the potential field.
 
 # Arguments
 - `state::SimulationState`: Current simulation state
-- `oX`: X coordinate array
-- `oY`: Y coordinate array
-- `oZ`: Z coordinate array
-- `M_0`: Initial mass
-- `constants::PhysicalConstants`: Physical constants
 
 # Returns
 - `Nothing`: The function modifies `state` in-place
 """
-function boundary_conditions!(state::SimulationState{T}, oX, oY, oZ, M_0, constants::PhysicalConstants{T}) where T
-    N = size(state.Phi, 1) - 2
-    G_ast = constants.G
-    
-    for i in 1:(N+2)
-        for j in 1:(N+2)
-            state.Phi[i, j, 1] = state.Phi[i, j, 2]  # Phi bc at z=0
-            state.Rho[i, j, 1] = state.Rho[i, j, 2]  # Rho bc at z=0
-            # Convert result to dimensionless value
-            potential = -G_ast * M_0 / sqrt(oX[i]^2 + oY[j]^2 + oZ[N+2]^2)
-            state.Phi[i, j, N+2] = ustrip(potential)  # bc at z=z_max
-        end
-    end
+function boundary_conditions(state::SimulationState, constants::SimulationConstants)
+    state.Phi[1, :, :] .= state.Phi[2, :, :]
+    state.Phi[:, 1, :] .= state.Phi[:, 2, :]
+    state.Phi[:, :, 1] .= state.Phi[:, :, 2]
 
-    for i in 1:(N+2)
-        for k in 1:(N+2)
-            state.Phi[i, 1, k] = state.Phi[i, 2, k]  # Phi bc at y=0
-            state.Rho[i, 1, k] = state.Rho[i, 2, k]  # Rho bc at y=0
-            # Convert result to dimensionless value
-            potential = -G_ast * M_0 / sqrt(oX[i]^2 + oY[N+2]^2 + oZ[k]^2)
-            state.Phi[i, N+2, k] = ustrip(potential)  # bc at y=y_max
-        end
-    end
+    state.Rho[1, :, :] .= state.Rho[2, :, :]
+    state.Rho[:, 1, :] .= state.Rho[:, 2, :]
+    state.Rho[:, :, 1] .= state.Rho[:, :, 2]
 
-    for j in 1:(N+2)
-        for k in 1:(N+2)
-            state.Phi[1, j, k] = state.Phi[2, j, k]  # Phi bc at x=0
-            state.Rho[1, j, k] = state.Rho[2, j, k]  # Rho bc at x=0
-            # Convert result to dimensionless value
-            potential = -G_ast * M_0 / sqrt(oX[N+2]^2 + oY[j]^2 + oZ[k]^2)
-            state.Phi[N+2, j, k] = ustrip(potential)  # bc at x=x_max
+    for i in 1:(constants.N+2)
+        for j in 1:(constants.N+2)
+            x = -G * state.M / constants.distance_to_center[i, j, constants.N+2]
+            state.Phi[i, j, constants.N+2] = x
+            state.Phi[i, constants.N+2, j] = x
+            state.Phi[constants.N+2, i, j] = x
         end
     end
 end
 
 """
-    iterations_method!(state::SimulationState{T}, oX, oY, oZ, params::GridParameters{T}, constants::PhysicalConstants{T}, rho_c_ast) where T
+    iterations_method!(state::SimulationState{T}, constants::SimulationConstants{T}) where T
 
 Perform standard iterative method to solve gravitational potential equations.
 
 # Arguments
 - `state::SimulationState{T}`: Current simulation state
-- `oX`, `oY`, `oZ`: Grid coordinates
-- `params::GridParameters{T}`: Grid parameters
-- `constants::PhysicalConstants{T}`: Physical constants
-- `rho_c_ast`: Central density in simulation units
+- `constants::SimulationConstants{T}`: Physical constants
 
 # Returns
 - `SimulationState{T}`: Updated simulation state
 """
-function iterations_method!(state::SimulationState{T}, oX, oY, oZ, params::GridParameters{T}, constants::PhysicalConstants{T}, rho_c_ast) where T
-    # Extract grid parameters
-    N = params.N
-    dx = ustrip(params.step)
+function iterations_method!(state::SimulationState, constants::SimulationConstants)
+    boundary_conditions(state, constants)
+
+    factor = 4π * G * constants.Step^2 / 6
     
-    # Initialize gravity constant in simulation units
-    G_ast = ustrip(constants.G)
-    
-    # Pre-compute constants for the Poisson equation
-    h² = dx * dx
-    factor = 4π * G_ast * h² / 6
-    
-    # Store initial density
-    initial_rho = copy(state.Rho)
+    # Calculate the B constant for the barometric equation
+    B = constants.mu / R / constants.T
     
     # Jacobi iteration (could use SOR for better convergence)
     # Solve ∇²Φ = 4πGρ
-    for k in 2:N+1
-        for j in 2:N+1
-            for i in 2:N+1
+    Phi2 = copy(state.Phi)
+    local_sums = zeros(Float64, Threads.nthreads())
+    @threads for k in 2:constants.N+1
+        local_sum = 0.0
+        for j in 2:constants.N+1
+            for i in 2:constants.N+1
                 # Update potential based on the Poisson equation discretization
-                state.Phi[i,j,k] = (
+                Phi2[i,j,k] = (
                     state.Phi[i+1,j,k] + state.Phi[i-1,j,k] +
                     state.Phi[i,j+1,k] + state.Phi[i,j-1,k] +
                     state.Phi[i,j,k+1] + state.Phi[i,j,k-1] -
                     factor * state.Rho[i,j,k]
                 ) / 6
+                state.Rho[i,j,k] = constants.rho_0 * exp(-Phi2[i,j,k] * B)
+                local_sum += 8 * state.Rho[i,j,k] * constants.Step^3
             end
         end
+        local_sums[Threads.threadid()] += local_sum
     end
-    
-    # Apply boundary conditions - we don't update density anymore
-    boundary_conditions!(state, oX, oY, oZ, state.M, constants)
-    
+    state.Phi .= Phi2
+    state.M = sum(local_sums)
     return state
 end
+
 
 """
     extract_2d_slice(state::SimulationState, slice_dim=3, slice_idx=nothing)
@@ -473,112 +248,143 @@ function extract_2d_slice(state::SimulationState, slice_dim=3, slice_idx=nothing
     return phi_slice
 end
 
-"""
-    visualize_results(state, oX, oY, oZ; method="standard", n_iterations=100, grid_size=32, max_dist=4.0*AU, output_prefix="cloud")
 
-Visualize the simulation results using Makie.
+"""
+    visualize_results(state::SimulationState; n_iterations=1000, method="mt", output_prefix="cloud_model", size=40u"AU")
+
+Visualize simulation results with 1D, 2D slices and 3D contours for both density and potential.
 
 # Arguments
-- `state::SimulationState`: Final simulation state
-- `oX`, `oY`, `oZ`: Grid coordinates
-- `method::String`: Method used for simulation
-- `n_iterations::Int`: Number of iterations
-- `grid_size::Int`: Grid resolution
-- `max_dist::Quantity`: Maximum distance from origin
-- `output_prefix::String`: Prefix for output files
+- `state::SimulationState`: Final state of the simulation
+- `n_iterations::Int`: Number of iterations performed (default: 1000)
+- `method::String`: Simulation method used (default: "mt" for multithreaded)
+- `output_prefix::String`: Prefix for output filename (default: "cloud_model")
+- `size::Float64`: Physical size of the simulation domain (default: 40.0)
 
 # Returns
-- `Figure`: Makie figure object
+- `Figure`: The created figure object
 """
-function visualize_results(state, oX, oY, oZ; method="standard", n_iterations=100, grid_size=32, max_dist=4.0*AU, output_prefix="cloud")
-    # Create figure
-    fig = Figure(size=(1200, 1000))
+function visualize_results(state::SimulationState, constants::SimulationConstants; 
+                           n_iterations=1000, 
+                           output_prefix="cloud_model",
+)
+    # Create figure with 3 rows, 2 columns
+    fig = Figure(size=(1600, 1300))
+    size = constants.Step * (constants.N)
+    # Create coordinate arrays
+    N = constants.N
+    state.Rho = state.Rho ./ constants.rho_0
+    # Create coordinate ranges for visualization
+    x_coords = range(0, ustrip(Float64, u"AU", size * u"m") , length=N)
+    y_coords = range(0, ustrip(Float64, u"AU", size * u"m") , length=N)
+    z_coords = range(0, ustrip(Float64, u"AU", size * u"m") , length=N)
     
-    # Extract potential slices for visualization at different positions
-    phi_xy_mid = extract_2d_slice(state, 3, div(grid_size+2, 2))
-    phi_xz_mid = extract_2d_slice(state, 2, div(grid_size+2, 2))
-    phi_yz_mid = extract_2d_slice(state, 1, div(grid_size+2, 2))
+    # Extract 1D slices for density and potential along X-axis where Y=0, Z=0
+    x_values = collect(x_coords)
+    rho_1d = state.Rho[2:end-1, 1, 1]
+    phi_1d = state.Phi[2:end-1, 1, 1]
     
-    phi_xy_quarter = extract_2d_slice(state, 3, div(grid_size+2, 4))
-    phi_xz_quarter = extract_2d_slice(state, 2, div(grid_size+2, 4))
-    phi_yz_quarter = extract_2d_slice(state, 1, div(grid_size+2, 4))
+    # Extract 2D slices for Z=0 plane
+    rho_xy = state.Rho[2:end-1, 2:end-1, 1]
+    phi_xy = state.Phi[2:end-1, 2:end-1, 1]
     
-    # Create heatmap plots for main slices
-    ax1 = Axis(fig[1, 1], title="Потенциал (плоскость XY, середина)", xlabel="X (а.е.)", ylabel="Y (а.е.)")
-    hm1 = heatmap!(ax1, ustrip.(oX[2:end-1]), ustrip.(oY[2:end-1]), phi_xy_mid[2:end-1, 2:end-1], colormap=:viridis)
-    Colorbar(fig[1, 2], hm1)
+    # 1D density plot (top-left)
+    ax1 = Axis(fig[1, 1], title="Density Distribution (ρ(X) for Y=0, Z=0)", 
+              xlabel="X (AU)", ylabel="Density")
+    lines!(ax1, x_values, rho_1d, color=:blue, linewidth=2)
+
     
-    ax2 = Axis(fig[1, 3], title="Потенциал (плоскость XZ, середина)", xlabel="X (а.е.)", ylabel="Z (а.е.)")
-    hm2 = heatmap!(ax2, ustrip.(oX[2:end-1]), ustrip.(oZ[2:end-1]), phi_xz_mid[2:end-1, 2:end-1], colormap=:viridis)
-    Colorbar(fig[1, 4], hm2)
+    # 1D potential plot (top-right)
+    ax2 = Axis(fig[1, 2], title="Potential Distribution (Φ(X) for Y=0, Z=0)", 
+              xlabel="X (AU)", ylabel="Potential")
+    lines!(ax2, x_values, phi_1d, color=:red, linewidth=2)
+
+    # 2D density colormap (middle-left)
+    ax3 = Axis(fig[2, 1], title="Density Distribution (ρ(X,Y) for Z=0)", 
+              xlabel="X (AU)", ylabel="Y (AU)")
+    y_values = collect(y_coords)
+    hm1 = heatmap!(ax3, x_values, y_values, rho_xy, colormap=:inferno)
+    Colorbar(fig[2, 1, Right()], hm1, label="Density")
+
     
-    ax3 = Axis(fig[2, 1], title="Потенциал (плоскость YZ, середина)", xlabel="Y (а.е.)", ylabel="Z (а.е.)")
-    hm3 = heatmap!(ax3, ustrip.(oY[2:end-1]), ustrip.(oZ[2:end-1]), phi_yz_mid[2:end-1, 2:end-1], colormap=:viridis)
-    Colorbar(fig[2, 2], hm3)
+    # 2D potential colormap (middle-right)
+    ax4 = Axis(fig[2, 2], title="Potential Distribution (Φ(X,Y) for Z=0)", 
+              xlabel="X (AU)", ylabel="Y (AU)")
+    hm2 = heatmap!(ax4, x_values, y_values, phi_xy, colormap=:viridis)
+    Colorbar(fig[2, 2, Right()], hm2, label="Potential")
+    # Set manual ticks to avoid warnings
+    ax4.xticks = LinearTicks(5)
+    ax4.yticks = LinearTicks(5)
     
-    # Create heatmap plots for quarter slices
-    ax4 = Axis(fig[2, 3], title="Потенциал (плоскость XY, четверть)", xlabel="X (а.е.)", ylabel="Y (а.е.)")
-    hm4 = heatmap!(ax4, ustrip.(oX[2:end-1]), ustrip.(oY[2:end-1]), phi_xy_quarter[2:end-1, 2:end-1], colormap=:viridis)
-    Colorbar(fig[2, 4], hm4)
+    # Prepare 3D data
+    # Get ranges for 3D visualization
+    x_range = x_values
+    y_range = y_values
+    z_range = collect(z_coords)
     
-    # Create 3D visualization of potential
-    ax5 = Axis3(fig[3, 1:2], title="3D Визуализация Потенциала (Объем)", xlabel="X (а.е.)", ylabel="Y (а.е.)", zlabel="Z (а.е.)")
+    # Extract 3D data and normalize for visualization
+    norm_rho = state.Rho[2:end-1, 2:end-1, 2:end-1]
+    min_rho = minimum(norm_rho)
+    max_rho = maximum(norm_rho)
+    norm_rho = (norm_rho .- min_rho) ./ (max_rho - min_rho)
     
-    # Create a 3D volume visualization
-    x_range = ustrip.(oX[2:end-1])
-    y_range = ustrip.(oY[2:end-1])
-    z_range = ustrip.(oZ[2:end-1])
+    norm_phi = state.Phi[2:end-1, 2:end-1, 2:end-1]
+    min_phi = minimum(norm_phi)
+    max_phi = maximum(norm_phi)
+    norm_phi = (norm_phi .- min_phi) ./ (max_phi - min_phi)
     
     # Get min and max values for each dimension
     x_min, x_max = extrema(x_range)
     y_min, y_max = extrema(y_range)
     z_min, z_max = extrema(z_range)
     
-    # Normalize potential for better visualization
-    norm_phi = state.Phi[2:end-1, 2:end-1, 2:end-1]
-    min_phi = minimum(norm_phi)
-    max_phi = maximum(norm_phi)
-    norm_phi = (norm_phi .- min_phi) ./ (max_phi - min_phi)
+    # Define contour levels and colors
+    density_levels = [0.1, 0.3, 0.5, 0.7, 0.9]
+    potential_levels = [0.1, 0.3, 0.5, 0.7, 0.9]
+    contour_colors = [:orange, :red, :purple, :blue, :cyan]
     
-    # Print min/max for debugging
-    println("Диапазон потенциала: $min_phi до $max_phi")
-    println("Нормализованный диапазон потенциала: 0.0 до 1.0")
+    # 3D density contour plot (bottom-left)
+    ax5 = Axis3(fig[3, 1], title="Density Contours (3D)", 
+               xlabel="X (AU)", ylabel="Y (AU)", zlabel="Z (AU)")
     
-    # Create volume plot
-    volume!(ax5, (x_min, x_max), (y_min, y_max), (z_min, z_max), norm_phi, 
-            algorithm=:mip,
-            colormap=:viridis)
-    
-    # Set camera position for front view
-    cam3d!(ax5.scene, eyeposition=Vec3f(2.5, 0, 0), lookat=Vec3f(0, 0, 0))
-    
-    # Create second 3D view with contour surfaces
-    ax6 = Axis3(fig[3, 3:4], title="3D Визуализация Потенциала (Контуры)", xlabel="X (а.е.)", ylabel="Y (а.е.)", zlabel="Z (а.е.)")
-    
-    # Create equipotential contour surfaces at multiple levels
-    contour_levels = range(0.2, 0.8, length=6)
-    contour_colors = range(colorant"blue", colorant"red", length=length(contour_levels))
-    
-    for (i, level) in enumerate(contour_levels)
-        contour!(ax6, (x_min, x_max), (y_min, y_max), (z_min, z_max), norm_phi, 
-                levels=[level], 
+    for (i, level) in enumerate(density_levels)
+        contour!(ax5, (x_min, x_max), (y_min, y_max), (z_min, z_max), norm_rho,
+                levels=[level],
                 color=contour_colors[i],
                 transparency=true,
-                alpha=0.7)
+                alpha=0.6,
+                linewidth=0.5)
     end
     
-    # Set camera position for top-side view
-    cam3d!(ax6.scene, eyeposition=Vec3f(1.5, 1.5, 1.5), lookat=Vec3f(0, 0, 0))
+    # Set camera position and manual ticks
+    cam3d!(ax5.scene, eyeposition=Vec3f(2.5, 2.5, 2.5), lookat=Vec3f(0, 0, 0))
+    
+    # 3D potential contour plot (bottom-right)
+    ax6 = Axis3(fig[3, 2], title="Potential Contours (3D)",
+               xlabel="X (AU)", ylabel="Y (AU)", zlabel="Z (AU)")
+    
+    for (i, level) in enumerate(potential_levels)
+        contour!(ax6, (x_min, x_max), (y_min, y_max), (z_min, z_max), norm_phi,
+                levels=[level],
+                color=contour_colors[i],
+                transparency=true,
+                alpha=0.6,
+                linewidth=0.5)
+    end
+    
+    # Set camera position and manual ticks
+    cam3d!(ax6.scene, eyeposition=Vec3f(2.5, 2.5, 2.5), lookat=Vec3f(0, 0, 0))
     
     # Add simulation parameters as text
-    Label(fig[0, :], "Результаты Моделирования Облака - Метод: $(uppercase(method))")
-    param_text = "Сетка: $(grid_size)³ | Итераций: $n_iterations | Макс. расстояние: $(round(ustrip(max_dist), digits=2)) а.е."
-    Label(fig[4, :], param_text)
+    Label(fig[0, :], "Cloud Model Simulation Results",
+          fontsize=20)
+    param_text = "Grid: $(N)³ | Iterations: $n_iterations | Max Distance: $(round(ustrip(Float64, u"AU", size * u"m"), digits=2)) AU | Mass: $(round(ustrip(Float64, u"Msun", 1000 * state.M * u"kg"), digits=2)) 1e-3 Msun"
+    Label(fig[4, :], param_text, fontsize=16)
     
     # Save figure to file
-    filename = "$(output_prefix)_$(method)_$(grid_size).png"
+    filename = "$(output_prefix)_$(N)_$(n_iterations)_$(ustrip(Float64, u"AU", size * u"m")).png"
     save(filename, fig)
-    println("Визуализация сохранена в файл $filename")
+    println("Visualization saved to file $filename")
     
     return fig
 end
@@ -593,61 +399,76 @@ Parse command line arguments for the cloud model.
 """
 function parse_command_line()
     # Default values
-    iterations = 100
-    grid_size = 32
-    max_dist = 4.0
+    iterations = 1000
+    N = 50
+    size = 40.0
     
     # Process arguments
     for arg in ARGS
         if startswith(arg, "--iterations=")
             iterations = parse(Int, split(arg, "=")[2])
-        elseif startswith(arg, "--grid=")
-            grid_size = parse(Int, split(arg, "=")[2])
-        elseif startswith(arg, "--max-dist=")
-            max_dist = parse(Float64, split(arg, "=")[2])
+        elseif startswith(arg, "--N=")
+            N = parse(Int, split(arg, "=")[2])
+        elseif startswith(arg, "--size=")
+            size = parse(Float64, split(arg, "=")[2])
         end
     end
     
-    return iterations, grid_size, max_dist
+    return iterations, N, size
 end
 
 """
-    run_simulation(;n_iterations=100, x_max=4.0*AU, N=32, verbose=true)
+    run_simulation(; n_iterations=1000, size=40, N=50, verbose=true, M=1e-3, T=50, rho_0=6e-17, mu=2.35e-3)
 
-Run a standard iterative simulation of the gravitational potential in a cloud model.
+Run the cloud model simulation with specified parameters.
 
 # Arguments
-- `n_iterations::Int`: Number of iterations
-- `x_max::Quantity{Float64}`: Maximum distance from origin
-- `N::Int`: Grid resolution
-- `verbose::Bool`: Whether to print progress information
+- `n_iterations::Int`: Number of iterations to run (default: 1000)
+- `size::Float64`: Size of the simulation domain in AU (default: 40)
+- `N::Int`: Number of grid points per dimension (default: 50)
+- `verbose::Bool`: Whether to print progress information (default: true)
+- `M::Float64`: Mass of the cloud in solar masses (default: 1e-3)
+- `T::Float64`: Temperature of the cloud in Kelvin (default: 50)
+- `rho_0::Float64`: Initial density of the cloud in kg/m³ (default: 6e-17)
+- `mu::Float64`: Average molecular mass in kg/mol (default: 2.35e-3)
 
 # Returns
-- `state::SimulationState`: Final simulation state
-- `oX`, `oY`, `oZ`: Grid coordinates
-- `n_iterations`, `x_max`, `N`: Parameters used in the simulation
+- `SimulationState`: Final state of the simulation after all iterations
 """
-function run_simulation(;n_iterations=100, x_max=4.0*AU, N=32, verbose=true)
+function run_simulation(;
+        n_iterations=1000::Int, 
+        size=40.0::Real, 
+        N=50::Int, 
+        verbose=true::Bool, 
+        T=50.0,           #K
+        rho_0=6e-17,    #kg/m^3
+        mu=2.35e-3,     #kg/mol
+        )
+    constants = SimulationConstants(
+        ustrip(T * u"K" |> upreferred),                     # Temperature in K
+        ustrip(rho_0 * u"kg/m^3" |> upreferred),            # Density in kg/m^3
+        ustrip(mu * u"kg/mol" |> upreferred),               # Molar mass in kg/mol
+        ustrip(size * u"AU" / N |> upreferred),             # Step in meters
+        N,                                                  # Number of grid points
+    )
     # Initialize simulation components
-    constants = initialize_physical_constants()
-    params = initialize_grid(x_max, N)
-    oX, oY, oZ = create_grid(params)
-    state = initialize_simulation_state(params)
-    
-    # Set central density - needed for potential calculation
-    rho_c_ast = rho_0
+    state = initialize_simulation_state(
+        ustrip(Float64, u"m", size * u"AU"), #size in meters
+        constants
+    )
     
     # Run iteration loop
     if verbose
-        println("Запуск стандартного итерационного моделирования...")
-        println("Размер сетки: $N, Итераций: $n_iterations")
+        println("Запуск многопоточного итерационного моделирования...")
+        println("Размер сетки: $N, Итераций: $n_iterations, Потоков: $(nthreads())")
     end
     
     for iter in 1:n_iterations
-        # Update state using iterative method
-        iterations_method!(state, oX, oY, oZ, params, constants, rho_c_ast)
-        
-        if verbose && iter % 10 == 0
+        # Update state using iterative method with multithreading
+        iterations_method!(state, constants)
+
+        # Avoid division by zero for progress reporting
+        if verbose && iter % max(1, n_iterations ÷ 20) == 0
             println("  Завершено итераций $iter из $n_iterations")
         end
     end
@@ -656,40 +477,33 @@ function run_simulation(;n_iterations=100, x_max=4.0*AU, N=32, verbose=true)
         println("Моделирование завершено!")
     end
     
-    return state, oX, oY, oZ, n_iterations, x_max, N
+    return state, constants
 end
 
-end # end of module CloudModel
-
+end 
 # Main entry point if this file is executed directly
 if abspath(PROGRAM_FILE) == @__FILE__
     # Parse command line arguments
-    iterations, grid_size, max_dist = CloudModel.parse_command_line()
+    global iterations, N, size = CloudModel.parse_command_line()
     
-    # Set method name for visualization
-    method_name = "standard"
-    
+
     println("Запуск моделирования с параметрами:")
-    println("  Размер сетки: $(grid_size)×$(grid_size)×$(grid_size)")
-    println("  Максимальное расстояние: $(max_dist) а.е.")
+    println("  Размер сетки: $(N)×$(N)×$(N)")
+    println("  Размер области: $(size)а.е.x$(size)а.е.x$(size)а.е.")
     println("  Итераций: $iterations")
     
-    println("  Метод: Стандартный Итерационный")
-    state, oX, oY, oZ, iterations, x_max, grid_size = CloudModel.run_simulation(
+    println("  Метод: Многопоточный Итерационный ($(Threads.nthreads()) потоков)")
+    state, constants = CloudModel.run_simulation(
         n_iterations=iterations, 
-        x_max=max_dist * CloudModel.AU, 
-        N=grid_size, 
+        size=size, 
+        N=N, 
         verbose=true
     )
-    
+
     # Visualize results with all parameters
     println("Моделирование завершено. Визуализация результатов...")
     CloudModel.visualize_results(
-        state, oX, oY, oZ,
-        method=method_name,
+        state, constants,
         n_iterations=iterations,
-        grid_size=grid_size,
-        max_dist=x_max,
-        output_prefix="gravitational"
     )
-end 
+end

@@ -1,107 +1,68 @@
-# Cloud Model (Облачная Модель)
+# Cloud Model
 
-## Описание проекта
+A high-performance gravitational simulation focused on modeling cloud collapse and stellar formation. This project implements a direct iterative approach for computing gravitational potentials.
 
-Данный проект представляет собой программную реализацию модели гравитационного потенциала в облаке газа. Модель использует итерационные методы для расчета гравитационного потенциала, плотности и массы в трехмерной сетке координат. Основное внимание уделяется астрофизическим расчетам с использованием правильных физических единиц измерения.
+## Features
 
-## Структура кода
+- **Direct iterative computation** for grid-based gravitational potential solving
+- **Barometric density distribution** based on gravitational potential
+- **Proper physical units** via Unitful.jl and UnitfulAstro.jl
+- **Visualization tools** for analyzing simulation results
+- **Command-line interface** for easy simulation configuration
 
-Код организован в виде модуля `CloudModel` со следующей структурой:
+## Installation
 
-### Основные типы данных
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/cloud-model.git
+cd cloud-model
 
-- `PhysicalConstants` - структура для хранения физических констант (гравитационная постоянная, газовая постоянная, температура, молекулярная масса)
-- `GridParameters` - структура для хранения параметров расчетной сетки
-- `SimulationState` - структура для хранения состояния симуляции (потенциал, плотность, масса)
-
-### Ключевые функции
-
-- `F(X, Y, Z)` - расчет производных для дифференциального уравнения
-- `euler_method(...)` - численное интегрирование методом Эйлера
-- `runge_kutta(...)` - численное интегрирование методом Рунге-Кутта
-- `initialize_physical_constants()` - инициализация физических констант
-- `initialize_grid(...)` - создание параметров расчетной сетки
-- `create_grid(...)` - создание трехмерной координатной сетки
-- `initialize_simulation_state(...)` - инициализация начального состояния симуляции
-- `boundary_conditions!(...)` - установка граничных условий для расчета
-- `iterations_method!(...)` - выполнение итераций для решения уравнения гравитационного потенциала
-- `run_simulation(...)` - запуск полной симуляции с заданными параметрами
-- `visualize_results(...)` - визуализация результатов расчетов
-
-## Зависимости
-
-Для работы с проектом требуются следующие пакеты Julia:
-
-- `Unitful` - для работы с физическими единицами измерения
-- `UnitfulAstro` - для работы с астрономическими единицами измерения
-- `GLMakie` - для интерактивной визуализации результатов
-- `LinearAlgebra` - для матричных операций
-- `StaticArrays` - для эффективной работы с массивами фиксированного размера
-
-## Установка и использование
-
-### Установка зависимостей
-
-```julia
-using Pkg
-Pkg.add(["Unitful", "UnitfulAstro", "GLMakie", "LinearAlgebra", "StaticArrays"])
+# Install dependencies
+julia --project=. -e 'using Pkg; Pkg.instantiate()'
 ```
 
-### Пример использования
+## Quick Start
 
-```julia
-# Импортировать модуль
-using .CloudModel
+### Running a simulation
 
-# Запустить симуляцию с параметрами по умолчанию
-# (1000 итераций, максимальная координата 4.0 а.е., размер сетки 15)
-state, oX, oY, oZ = run_simulation(1000)
-
-# Визуализировать результаты
-visualize_results(state, oX, oY, oZ)
-
-# Запустить симуляцию с пользовательскими параметрами
-state, oX, oY, oZ = run_simulation(2000, 6.0u"AU", 20)
-
-# Визуализировать конкретный срез (плоскость XY на z=5)
-visualize_results(state, oX, oY, oZ, slice_dim=3, slice_idx=5)
+```bash
+# Standard direct method
+julia cloud_model.jl --iterations 1000 --grid 30 --max-dist 4.0
 ```
 
-## Физические уравнения
+### Visualization
 
-Модель основана на следующих физических уравнениях:
+Results are automatically visualized after simulation completion:
 
-1. Уравнение Пуассона для гравитационного потенциала:
-   ∇²Φ = 4πG⋅ρ
+```bash
+# Visualization is included in the main simulation flow
+# Output is saved as gravitational_standard_N.png where N is the grid size
+```
 
-2. Связь между плотностью и потенциалом:
-   ρ = ρ₀⋅exp(-Φ⋅μ/RT)
+## Numerical Methods
 
-где:
-- Φ - гравитационный потенциал
-- ρ - плотность
-- G - гравитационная постоянная
-- R - газовая постоянная
-- T - температура
-- μ - молекулярная масса
+The model solves Poisson's equation for gravitational potential (∇²Φ = 4πGρ) using an iterative approach with a barometric density law (ρ = ρ₀ * exp(-μΦ/RT)).
 
-## Визуализация
+Key components:
+- Discretized Laplacian operator on a uniform grid
+- Iterative Jacobi method for solving the Poisson equation
+- Barometric density calculation using the current potential field
+- Appropriate boundary conditions at domain edges
 
-Проект предоставляет следующие возможности визуализации:
+## Project Structure
 
-- Трехмерный график поверхности потенциала
-- Двумерная тепловая карта потенциала
-- Контурный график потенциала
+- `cloud_model.jl`: Main module and simulation logic with the following components:
+  - Physical constants with proper units
+  - Grid-based simulation state management
+  - Iterative Poisson equation solver
+  - Density calculation based on potential
+  - Visualization utilities for 2D slices through the 3D domain
+  - Command-line argument parsing
 
-Все результаты можно сохранить в виде графических файлов формата PNG.
+## References
 
-## Ограничения и дальнейшее развитие
+1. Press, W.H., Teukolsky, S.A., Vetterling, W.T., & Flannery, B.P. (2007). Numerical Recipes: The Art of Scientific Computing (3rd Edition). Cambridge University Press.
 
-- Текущая реализация использует явную сетку с постоянным шагом
-- Предполагается изотермическое приближение (постоянная температура)
-- Возможно улучшение производительности с использованием параллельных вычислений
-- Планируется добавление возможности симуляции нестационарных процессов
+## License
 
-## Авторы
-
-Реализация на языке Julia на основе оригинального кода на Python.
+MIT License

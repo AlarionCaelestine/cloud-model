@@ -1,0 +1,16 @@
+# Ignore visualization outputs
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.pdf
+*.mp4
+*.avi
+*.mov
+
+# Visualization directories
+visualizations/
+output/
+figures/
+plots/

@@ -32,8 +32,6 @@ CloudModel - это комплексная реализация гравитац
 
 ## Установка
 
-### Метод 1: Прямая установка из GitHub (рекомендуется)
-
 1. Клонируйте репозиторий:
 ```bash
 git clone https://github.com/AlarionCaelestine/cloud-model.git
@@ -45,48 +43,19 @@ cd cloud-model
 julia -e 'using Pkg; Pkg.add(["Unitful", "UnitfulAstro", "GLMakie", "StaticArrays", "ProgressBars"])'
 ```
 
-3. Сделайте скрипт исполняемым:
-```bash
-chmod +x run_model.jl
-```
-
-### Метод 2: Установка как пакет Julia
-
-1. Клонируйте репозиторий:
-```bash
-git clone https://github.com/AlarionCaelestine/cloud-model.git
-cd cloud-model
-```
-
-2. Установите пакет:
-```bash
-julia install.jl
-```
-
-3. Добавьте путь к исполняемым файлам в PATH:
-```bash
-export PATH="$PATH:$HOME/.julia/bin"
-```
-
 ## Запуск модели
 
 ### Базовый запуск
 
 ```bash
-./run_model.jl
-```
-
-### Запуск с параметрами
-
-```bash
-./run_model.jl --iterations=5000 --N=100 --size=50
+julia --threads=auto run_model.jl --iterations=5000 --N=100 --size=50
 ```
 
 Доступные параметры:
 - `--iterations=N`: Количество итераций (по умолчанию: 1000)
 - `--N=N`: Размер сетки (по умолчанию: 50)
 - `--size=N`: Размер области в а.е. (по умолчанию: 40)
-- `--threads=N`: Количество потоков (по умолчанию: максимум доступных)
+- `--threads=N`: Количество потоков (по умолчанию: 1)
 
 ### Использование в коде Julia
 

@@ -1,0 +1,20 @@
+name = "CloudModel"
+uuid = "ff8010a3-2164-47e6-859a-33166f50d7ff"
+authors = ["AlarionCaelestine <alarion239@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+ProgressBars = "49802e3a-d2f1-5c88-81d8-b72133a6f568"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
+UnitfulAstro = "6112ee07-acf9-5e0f-b108-d242c714bf9f"
+
+[compat]
+GLMakie = "0.11.5"
+ProgressBars = "1.5.1"
+StaticArrays = "1.9.13"
+Unitful = "1.22.0"
+UnitfulAstro = "1.2.2"
+julia = "1.6"

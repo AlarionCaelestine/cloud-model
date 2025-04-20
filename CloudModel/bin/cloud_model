@@ -1,0 +1,50 @@
+#!/usr/bin/env julia
+
+# Активируем проект для доступа к зависимостям
+import Pkg
+Pkg.activate(@__DIR__) # Активируем проект в текущей директории
+
+# Устанавливаем недостающие зависимости при первом запуске
+begin
+    deps = ["Unitful", "UnitfulAstro", "GLMakie", "StaticArrays", "ProgressBars"]
+    missing = filter(pkg -> try; @eval import $(Symbol(pkg)); false; catch; true; end, deps)
+    
+    if !isempty(missing)
+        println("Установка необходимых пакетов: $(join(missing, ", "))")
+        Pkg.add(missing)
+        for pkg in missing
+            @eval using $(Symbol(pkg))
+        end
+    end
+end
+
+using CloudModel
+
+# Запуск основной функциональности
+if abspath(PROGRAM_FILE) == @__FILE__
+    # Разбор аргументов командной строки
+    iterations, N, size = CloudModel.parse_command_line()
+    
+    println("Запуск моделирования газового облака с параметрами:")
+    println("  Размер сетки: $(N)×$(N)×$(N) точек")
+    println("  Размер области: $(size) а.е. × $(size) а.е. × $(size) а.е.")
+    println("  Количество итераций: $iterations")
+    println("  Количество потоков: $(Threads.nthreads())")
+    
+    # Запуск симуляции
+    state, constants = CloudModel.run_simulation(
+        n_iterations=iterations, 
+        size=size, 
+        N=N, 
+        verbose=true
+    )
+
+    # Визуализация результатов
+    println("Моделирование завершено. Выполняется визуализация результатов...")
+    CloudModel.visualize_results(
+        state, constants,
+        n_iterations=iterations,
+    )
+    
+    println("Визуализация завершена. Расчет выполнен с использованием $(Threads.nthreads()) потоков.")
+end

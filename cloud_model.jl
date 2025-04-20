@@ -1,38 +1,48 @@
 """
 CloudModel
 
-A comprehensive Julia implementation of a gravitational potential model for gas clouds in astrophysics.
-This model calculates the gravitational potential, density, and mass distribution in a gas cloud
-using iterative numerical methods.
+Комплексная реализация гравитационной модели газовых облаков в астрофизике на языке Julia.
+Эта модель рассчитывает гравитационный потенциал, плотность и распределение массы в газовом облаке
+с использованием итеративных численных методов и решает систему уравнений Пуассона.
 
-## Core Features
+## Физическая основа
+- Уравнение Пуассона для гравитационного потенциала: ∇²Φ = 4πGρ
+- Барометрическое уравнение для плотности: ρ = ρ₀·exp(-Φμ/RT)
+- Итеративное решение системы связанных уравнений
 
-- Poisson's equation solver for gravitational potentials
-- Barometric density distribution
-- Proper physical units via Unitful.jl
-- Visualization tools
-- Multithreaded computation
+## Основные возможности
 
-## Main Functions
+- Решение уравнения Пуассона для гравитационных потенциалов
+- Барометрическое распределение плотности
+- Работа с физическими единицами через Unitful.jl
+- Инструменты визуализации результатов в 1D, 2D и 3D
+- Многопоточные вычисления для ускорения расчетов
 
-- `run_simulation`: Run simulation with standard direct computation
-- `run_simulation_mt`: Run simulation with multithreaded computation
-- `visualize_results`: Visualize simulation results
+## Основные функции
 
-## Examples
+- `run_simulation`: Запуск симуляции облака с многопоточным вычислением
+- `visualize_results`: Визуализация результатов симуляции в виде графиков и карт
+- `extract_2d_slice`: Извлечение 2D срезов из 3D моделей для анализа
+
+## Примеры
 
 ```julia
-# Run with standard method
-state, oX, oY, oZ = run_simulation()
+# Запуск симуляции с параметрами по умолчанию
+state, constants = run_simulation()
 
-# Run with multithreading
-state, oX, oY, oZ = run_simulation_mt(threads=Threads.nthreads())
+# Запуск с пользовательскими параметрами
+state, constants = run_simulation(
+    n_iterations=2000, 
+    size=60.0,
+    N=100, 
+    T=30.0
+)
 
-# Visualize results
-visualize_results(state, oX, oY, oZ)
+# Визуализация результатов
+visualize_results(state, constants)
 ```
 
-See the README.md file for more details.
+Подробности смотрите в файле README.md.
 """
 module CloudModel
 
@@ -42,13 +52,14 @@ using GLMakie
 using LinearAlgebra
 using StaticArrays
 using Base.Threads: @threads, nthreads, threadid
+using ProgressBars  
 
-# Fundamental constants
-const G = ustrip(6.67e-11u"m^3/kg/s^2" |> upreferred) # Gravitational constant
-const R = ustrip(8.31u"J/mol/K" |> upreferred) # Gas constant
+# Фундаментальные физические константы
+const G = ustrip(6.67e-11u"m^3/kg/s^2" |> upreferred) # Гравитационная постоянная
+const R = ustrip(8.31u"J/mol/K" |> upreferred) # Газовая постоянная
 
 
-# Export constants and types
+# Экспорт констант, типов и функций
 export G, R
 export SimulationConstants, SimulationState
 export run_simulation, visualize_results, extract_2d_slice
@@ -56,73 +67,106 @@ export parse_command_line
 
 
 """
-    SimulationConstants{T}
+    SimulationConstants
 
-Structure for storing physical constants used in the simulation.
+Структура для хранения физических констант и параметров сетки, используемых в симуляции.
 
-# Fields
-- `T::Float64`: Temperature of the cloud (K)
-- `rho_0::Float64`: Density of the cloud (kg/m^3)
-- `mu::Float64`: Average molecular mass (Msun/mol)
-- `Step::Float64`: Grid step
-- `N::Int`: Number of grid points
+# Поля
+- `T::Float64`: Температура облака (K)
+- `rho_0::Float64`: Начальная плотность облака (kg/m^3)
+- `mu::Float64`: Средняя молекулярная масса газа (kg/mol)
+- `Step::Float64`: Шаг пространственной сетки (m)
+- `N::Int`: Количество точек сетки по одному измерению
+- `distance_to_center::Array{Float64, 3}`: Предварительно рассчитанные расстояния от каждой точки сетки до центра (m)
 """
 struct SimulationConstants
-    T::Float64          # Temperature of the cloud (K)
-    rho_0::Float64      # Density of the cloud (kg/m^3)
-    mu::Float64         # Average molecular mass (Msun/mol)
-    Step::Float64       # Grid step
-    N::Int              # Number of grid points
-    distance_to_center::Array{Float64, 3} # Distance to the center of the cloud
+    T::Float64          # Температура облака (K)
+    rho_0::Float64      # Начальная плотность облака (kg/m^3)
+    mu::Float64         # Средняя молекулярная масса газа (kg/mol)
+    Step::Float64       # Шаг пространственной сетки (m)
+    N::Int              # Количество точек сетки по одному измерению
+    distance_to_center::Array{Float64, 3} # Расстояние от каждой точки до центра (m)
 end
 
+"""
+    SimulationConstants(T::Float64, rho_0::Float64, mu::Float64, Step::Float64, N::Int)
+
+Конструктор для создания структуры SimulationConstants с предварительным расчетом расстояний до центра.
+
+# Аргументы
+- `T::Float64`: Температура облака (K)
+- `rho_0::Float64`: Начальная плотность облака (kg/m^3)
+- `mu::Float64`: Средняя молекулярная масса (kg/mol)
+- `Step::Float64`: Шаг пространственной сетки (m)
+- `N::Int`: Количество точек сетки по одному измерению
+
+# Возвращает
+- `SimulationConstants`: Структура с константами симуляции и рассчитанными расстояниями
+"""
 function SimulationConstants(T::Float64, rho_0::Float64, mu::Float64, Step::Float64, N::Int)
+    # Расчет расстояний от каждой точки сетки до центра
+    # Центр облака размещен в точке (1.5, 1.5, 1.5) в индексах сетки
     distance_to_center = [sqrt((i - 1.5)^2 + (j-1.5)^2 + (k-1.5)^2) * Step for i in 1:(N+2), j in 1:(N+2), k in 1:(N+2)]
     return SimulationConstants(T, rho_0, mu, Step, N, distance_to_center)
 end
 
 """
-    SimulationState{T}
+    SimulationState
 
-Structure for storing the current state of the simulation.
+Структура для хранения текущего состояния симуляции газового облака.
 
-This structure holds the gravitational potential and density fields, along with grid parameters.
-It is used throughout the simulation to track the evolving state of the cloud model.
-We will update the state of the simulation for 2:N+1 indices, while the first and last indices are the boundary conditions.
+Эта структура содержит основные физические характеристики моделируемого облака:
+гравитационный потенциал, распределение плотности и общую массу. Структура используется
+на протяжении всей симуляции для отслеживания эволюции модели облака.
 
-# Fields
-- `Phi::Array{Float64, 3}`: Gravitational potential
-- `Rho::Array{Float64, 3}`: Density
-- `M::Float64`: Mass of the cloud (kg)
+Моделирование происходит на трехмерной сетке размером (N+2)×(N+2)×(N+2), где крайние элементы
+(с индексами 1 и N+2) служат граничными условиями, а расчеты ведутся для внутренних ячеек
+с индексами 2:N+1.
+
+# Поля
+- `Phi::Array{Float64, 3}`: Трехмерный массив значений гравитационного потенциала
+- `Rho::Array{Float64, 3}`: Трехмерный массив значений плотности вещества
+- `M::Float64`: Общая масса облака (kg)
 """
 mutable struct SimulationState
-    Phi::Array{Float64, 3}  # Gravitational potential
-    Rho::Array{Float64, 3}  # Density
-    M::Float64              # Mass of the cloud (kg)
+    Phi::Array{Float64, 3}  # Гравитационный потенциал
+    Rho::Array{Float64, 3}  # Плотность
+    M::Float64              # Масса облака (kg)
 end
 
 """
-    initialize_simulation_state(size::Float64, N::Int, constants::SimulationConstants)
+    initialize_simulation_state(size::Float64, constants::SimulationConstants)
 
-Initialize the simulation state with default values.
+Инициализация начального состояния симуляции с заданным размером области и константами.
 
-# Arguments
-- `params::GridParameters`: Grid parameters
+Эта функция создает начальное распределение плотности и гравитационного потенциала
+для газового облака. На начальном этапе облако имеет постоянную плотность,
+а потенциал рассчитывается для сферически-симметричного распределения массы.
 
-# Returns
-- `SimulationState`: Initialized simulation state
+# Аргументы
+- `size::Float64`: Физический размер области моделирования (m)
+- `constants::SimulationConstants`: Физические константы, используемые в симуляции
+
+# Возвращает
+- `SimulationState`: Инициализированное начальное состояние симуляции
 """
 function initialize_simulation_state(size::Float64, constants::SimulationConstants)
-    # Initialize arrays
-    Step = size / constants.N # size is the size of the grid, N is the number of grid points. There is a point to the left and right of the grid points, which are the boundary conditions.
+    # Инициализация трехмерных массивов для потенциала и плотности
     Phi = fill(0.0, constants.N+2, constants.N+2, constants.N+2)
-    Rho = fill(constants.rho_0, constants.N+2, constants.N+2, constants.N+2)
+    Rho = fill(0.0, constants.N+2, constants.N+2, constants.N+2)
 
-    M = constants.rho_0 * size^3 * 8 # 8 is the number of octants in the grid
-    Rho[1:end-1, 1:end-1, 1:end-1] .= constants.rho_0 # Set the density of the cloud to the average density
+    # Расчет общей массы облака (размер^3 * 8 октантов * плотность)
+    M = constants.rho_0 * size^3 * 8
+    
+    # Установка постоянной начальной плотности во всем облаке
+    Rho[1:end-1, 1:end-1, 1:end-1] .= constants.rho_0
+    
+    # Инициализация начального гравитационного потенциала
+    # с использованием предварительно рассчитанных расстояний до центра
     for i in 1:(constants.N+2)
         for j in 1:(constants.N+2)
             for k in 1:(constants.N+2)
+                # Потенциал сферически-симметричного тела: -GM/r
                 Phi[i, j, k] = -G * M / constants.distance_to_center[i, j, k]
             end
         end
@@ -132,17 +176,24 @@ function initialize_simulation_state(size::Float64, constants::SimulationConstan
 end
 
 """
-    boundary_conditions!(state)
+    boundary_conditions(state::SimulationState, constants::SimulationConstants)
 
-Apply boundary conditions to the potential field.
+Применение физически корректных граничных условий к полям потенциала и плотности.
 
-# Arguments
-- `state::SimulationState`: Current simulation state
+Эта функция устанавливает граничные условия для численного решения. Граничные условия
+для потенциала включают условия непрерывности на ближних границах (зеркальные граничные условия)
+и условия потенциала точечной массы на дальних границах.
 
-# Returns
-- `Nothing`: The function modifies `state` in-place
+# Аргументы
+- `state::SimulationState`: Текущее состояние симуляции
+- `constants::SimulationConstants`: Физические константы и параметры сетки
+
+# Возвращает
+Функция не возвращает значений, но модифицирует входную структуру `state`
 """
 function boundary_conditions(state::SimulationState, constants::SimulationConstants)
+    # Зеркальные граничные условия на ближних границах сетки (x=0, y=0, z=0)
+    # для потенциала и плотности
     state.Phi[1, :, :] .= state.Phi[2, :, :]
     state.Phi[:, 1, :] .= state.Phi[:, 2, :]
     state.Phi[:, :, 1] .= state.Phi[:, :, 2]
@@ -151,9 +202,13 @@ function boundary_conditions(state::SimulationState, constants::SimulationConsta
     state.Rho[:, 1, :] .= state.Rho[:, 2, :]
     state.Rho[:, :, 1] .= state.Rho[:, :, 2]
 
+    # Граничные условия на дальних границах (x=max, y=max, z=max)
+    # устанавливаем потенциал точечной массы -GM/r
     for i in 1:(constants.N+2)
         for j in 1:(constants.N+2)
+            # Расчет потенциала на основе текущей массы облака
             x = -G * state.M / constants.distance_to_center[i, j, constants.N+2]
+            # Применение граничных условий для трех граничных плоскостей
             state.Phi[i, j, constants.N+2] = x
             state.Phi[i, constants.N+2, j] = x
             state.Phi[constants.N+2, i, j] = x
@@ -162,48 +217,73 @@ function boundary_conditions(state::SimulationState, constants::SimulationConsta
 end
 
 """
-    iterations_method!(state::SimulationState{T}, constants::SimulationConstants{T}) where T
+    iterations_method!(state::SimulationState, constants::SimulationConstants)
 
-Perform standard iterative method to solve gravitational potential equations.
+Выполнение одной итерации метода для решения связанной системы уравнений гравитационного потенциала
+и барометрического распределения плотности.
 
-# Arguments
-- `state::SimulationState{T}`: Current simulation state
-- `constants::SimulationConstants{T}`: Physical constants
+Эта функция реализует итерационный метод Якоби для решения уравнения Пуассона (∇²Φ = 4πGρ)
+совместно с барометрическим уравнением плотности (ρ = ρ₀·exp(-Φμ/RT)). 
+В каждой итерации обновляется потенциал, затем плотность, и пересчитывается общая масса облака.
+Вычисления распараллеливаются по оси Z (индекс k) для повышения производительности.
 
-# Returns
-- `SimulationState{T}`: Updated simulation state
+# Аргументы
+- `state::SimulationState`: Текущее состояние симуляции
+- `constants::SimulationConstants`: Физические константы и параметры сетки
+
+# Возвращает
+- `SimulationState`: Обновленное состояние симуляции после одной итерации
 """
 function iterations_method!(state::SimulationState, constants::SimulationConstants)
+    # Сначала применяем граничные условия
     boundary_conditions(state, constants)
 
+    # Коэффициент для уравнения Пуассона в дискретной форме
+    # factor = 4πG(Δx)²/6, где 6 - коэффициент для трехмерного оператора Лапласа
     factor = 4π * G * constants.Step^2 / 6
     
-    # Calculate the B constant for the barometric equation
+    # Расчет константы B для барометрического уравнения: B = μ/(RT)
+    # Эта константа определяет, насколько быстро падает плотность с ростом потенциала
     B = constants.mu / R / constants.T
     
-    # Jacobi iteration (could use SOR for better convergence)
-    # Solve ∇²Φ = 4πGρ
+    # Копируем текущий потенциал для расчета обновленных значений
+    # (Метод Якоби требует использования значений с предыдущей итерации)
     Phi2 = copy(state.Phi)
+    
+    # Массив для хранения локальных сумм массы по потокам
     local_sums = zeros(Float64, Threads.nthreads())
+    
+    # Основной цикл итерации, распараллеленный по оси Z (индекс k)
     @threads for k in 2:constants.N+1
-        local_sum = 0.0
+        local_sum = 0.0  # Локальная сумма массы для текущего потока
         for j in 2:constants.N+1
             for i in 2:constants.N+1
-                # Update potential based on the Poisson equation discretization
+                # Дискретизация уравнения Пуассона (∇²Φ = 4πGρ) по 7-точечному шаблону
+                # ∇²Φ ≈ (Φᵢ₊₁,ⱼ,ₖ + Φᵢ₋₁,ⱼ,ₖ + Φᵢ,ⱼ₊₁,ₖ + Φᵢ,ⱼ₋₁,ₖ + Φᵢ,ⱼ,ₖ₊₁ + Φᵢ,ⱼ,ₖ₋₁ - 6Φᵢ,ⱼ,ₖ)/(Δx)²
                 Phi2[i,j,k] = (
                     state.Phi[i+1,j,k] + state.Phi[i-1,j,k] +
                     state.Phi[i,j+1,k] + state.Phi[i,j-1,k] +
                     state.Phi[i,j,k+1] + state.Phi[i,j,k-1] -
                     factor * state.Rho[i,j,k]
                 ) / 6
+                
+                # Обновление плотности по барометрическому уравнению: ρ = ρ₀·exp(-Φμ/RT)
                 state.Rho[i,j,k] = constants.rho_0 * exp(-Phi2[i,j,k] * B)
+                
+                # Накопление локальной массы (8 - коэффициент для расчета объема ячейки)
                 local_sum += 8 * state.Rho[i,j,k] * constants.Step^3
             end
         end
+        # Сохраняем локальную сумму для текущего потока
         local_sums[Threads.threadid()] += local_sum
     end
+    
+    # Обновляем потенциал новыми рассчитанными значениями
     state.Phi .= Phi2
+    
+    # Обновляем общую массу облака суммированием локальных сумм
     state.M = sum(local_sums)
+    
     return state
 end
 
@@ -211,38 +291,42 @@ end
 """
     extract_2d_slice(state::SimulationState, slice_dim=3, slice_idx=nothing)
 
-Extract a 2D slice from the 3D simulation state.
+Извлечение двумерного среза из трехмерного массива состояния симуляции.
 
-# Arguments
-- `state::SimulationState`: Simulation state
-- `slice_dim::Int`: Dimension to slice along (1=x, 2=y, 3=z)
-- `slice_idx::Union{Nothing, Int}`: Index for slice (if nothing, use middle of grid)
+Эта функция извлекает 2D срез (плоскость) из 3D массивов потенциала или плотности,
+что позволяет визуализировать и анализировать внутреннюю структуру моделируемого облака.
+Можно выбрать плоскость среза (XY, XZ или YZ) и конкретный индекс.
 
-# Returns
-- `Matrix`: 2D slice of the potential
+# Аргументы
+- `state::SimulationState`: Состояние симуляции, содержащее трехмерные массивы данных
+- `slice_dim::Int`: Измерение для среза (1=x, 2=y, 3=z, по умолчанию=3)
+- `slice_idx::Union{Nothing, Int}`: Индекс среза (если не указан, используется середина сетки)
+
+# Возвращает
+- `Matrix{Float64}`: Двумерный срез массива потенциала
 """
 function extract_2d_slice(state::SimulationState, slice_dim=3, slice_idx=nothing)
-    # Get dimensions of the grid
+    # Получение размеров сетки из массива потенциала
     nx, ny, nz = size(state.Phi)
     
-    # If no slice index provided, use the middle of the grid
+    # Если индекс среза не указан, используем середину сетки
     if isnothing(slice_idx)
         if slice_dim == 1
-            slice_idx = div(nx, 2)
+            slice_idx = div(nx, 2)  # Срез по плоскости YZ (постоянное X)
         elseif slice_dim == 2
-            slice_idx = div(ny, 2)
+            slice_idx = div(ny, 2)  # Срез по плоскости XZ (постоянное Y)
         else
-            slice_idx = div(nz, 2)
+            slice_idx = div(nz, 2)  # Срез по плоскости XY (постоянное Z)
         end
     end
     
-    # Extract slice based on dimension
+    # Извлечение среза в зависимости от выбранного измерения
     if slice_dim == 1
-        phi_slice = state.Phi[slice_idx, :, :]
+        phi_slice = state.Phi[slice_idx, :, :]  # Срез YZ
     elseif slice_dim == 2
-        phi_slice = state.Phi[:, slice_idx, :]
+        phi_slice = state.Phi[:, slice_idx, :]  # Срез XZ
     else
-        phi_slice = state.Phi[:, :, slice_idx]
+        phi_slice = state.Phi[:, :, slice_idx]  # Срез XY
     end
     
     return phi_slice
@@ -250,103 +334,109 @@ end
 
 
 """
-    visualize_results(state::SimulationState; n_iterations=1000, method="mt", output_prefix="cloud_model", size=40u"AU")
+    visualize_results(state::SimulationState, constants::SimulationConstants; 
+                     n_iterations=1000, output_prefix="cloud_model")
 
-Visualize simulation results with 1D, 2D slices and 3D contours for both density and potential.
+Визуализация результатов симуляции в виде 1D/2D/3D графиков для плотности и потенциала.
 
-# Arguments
-- `state::SimulationState`: Final state of the simulation
-- `n_iterations::Int`: Number of iterations performed (default: 1000)
-- `method::String`: Simulation method used (default: "mt" for multithreaded)
-- `output_prefix::String`: Prefix for output filename (default: "cloud_model")
-- `size::Float64`: Physical size of the simulation domain (default: 40.0)
+Эта функция создает комплексную визуализацию результатов моделирования газового облака,
+включая:
+1. Графики одномерных срезов плотности и потенциала
+2. Двумерные тепловые карты срезов облака
+3. Трехмерные контурные поверхности для анализа структуры
 
-# Returns
-- `Figure`: The created figure object
+Результат сохраняется в PNG-файл с названием, содержащим параметры симуляции.
+
+# Аргументы
+- `state::SimulationState`: Финальное состояние симуляции
+- `constants::SimulationConstants`: Физические константы и параметры сетки
+- `n_iterations::Int`: Количество выполненных итераций (по умолчанию: 1000)
+- `output_prefix::String`: Префикс для имени выходного файла (по умолчанию: "cloud_model")
+
+# Возвращает
+- `Figure`: Созданный объект фигуры для дальнейшего использования
 """
 function visualize_results(state::SimulationState, constants::SimulationConstants; 
                            n_iterations=1000, 
                            output_prefix="cloud_model",
 )
-    # Create figure with 3 rows, 2 columns
+    # Создание фигуры с 3 строками, 2 столбцами для размещения всех графиков
     fig = Figure(size=(1600, 1300))
+    
+    # Расчет физического размера области моделирования в метрах и нормализация плотности
     size = constants.Step * (constants.N)
-    # Create coordinate arrays
     N = constants.N
-    state.Rho = state.Rho ./ constants.rho_0
-    # Create coordinate ranges for visualization
-    x_coords = range(0, ustrip(Float64, u"AU", size * u"m") , length=N)
-    y_coords = range(0, ustrip(Float64, u"AU", size * u"m") , length=N)
-    z_coords = range(0, ustrip(Float64, u"AU", size * u"m") , length=N)
+    state.Rho = state.Rho ./ constants.rho_0  # Нормализация плотности для визуализации
     
-    # Extract 1D slices for density and potential along X-axis where Y=0, Z=0
+    # Создание диапазонов координат в астрономических единицах для визуализации
+    x_coords = range(0, ustrip(Float64, u"AU", size * u"m"), length=N)
+    y_coords = range(0, ustrip(Float64, u"AU", size * u"m"), length=N)
+    z_coords = range(0, ustrip(Float64, u"AU", size * u"m"), length=N)
+    
+    # Извлечение одномерных срезов для плотности и потенциала вдоль оси X при Y=0, Z=0
     x_values = collect(x_coords)
-    rho_1d = state.Rho[2:end-1, 1, 1]
-    phi_1d = state.Phi[2:end-1, 1, 1]
+    rho_1d = state.Rho[2:end-1, 1, 1]  # Плотность вдоль оси X
+    phi_1d = state.Phi[2:end-1, 1, 1]  # Потенциал вдоль оси X
     
-    # Extract 2D slices for Z=0 plane
-    rho_xy = state.Rho[2:end-1, 2:end-1, 1]
-    phi_xy = state.Phi[2:end-1, 2:end-1, 1]
+    # Извлечение двумерных срезов для плоскости Z=0
+    rho_xy = state.Rho[2:end-1, 2:end-1, 1]  # Срез плотности в плоскости XY
+    phi_xy = state.Phi[2:end-1, 2:end-1, 1]  # Срез потенциала в плоскости XY
     
-    # 1D density plot (top-left)
-    ax1 = Axis(fig[1, 1], title="Density Distribution (ρ(X) for Y=0, Z=0)", 
-              xlabel="X (AU)", ylabel="Density")
+    # 1D график плотности (в верхнем левом углу)
+    ax1 = Axis(fig[1, 1], title="Распределение плотности (ρ(X) для Y=0, Z=0)", 
+              xlabel="X (а.е.)", ylabel="Относительная плотность (ρ/ρ₀)")
     lines!(ax1, x_values, rho_1d, color=:blue, linewidth=2)
-
     
-    # 1D potential plot (top-right)
-    ax2 = Axis(fig[1, 2], title="Potential Distribution (Φ(X) for Y=0, Z=0)", 
-              xlabel="X (AU)", ylabel="Potential")
+    # 1D график потенциала (в верхнем правом углу)
+    ax2 = Axis(fig[1, 2], title="Распределение потенциала (Φ(X) для Y=0, Z=0)", 
+              xlabel="X (а.е.)", ylabel="Гравитационный потенциал")
     lines!(ax2, x_values, phi_1d, color=:red, linewidth=2)
 
-    # 2D density colormap (middle-left)
-    ax3 = Axis(fig[2, 1], title="Density Distribution (ρ(X,Y) for Z=0)", 
-              xlabel="X (AU)", ylabel="Y (AU)")
+    # 2D тепловая карта плотности (в центре слева)
+    ax3 = Axis(fig[2, 1], title="Распределение плотности (ρ(X,Y) для Z=0)", 
+              xlabel="X (а.е.)", ylabel="Y (а.е.)")
     y_values = collect(y_coords)
     hm1 = heatmap!(ax3, x_values, y_values, rho_xy, colormap=:inferno)
-    Colorbar(fig[2, 1, Right()], hm1, label="Density")
-
+    Colorbar(fig[2, 1, Right()], hm1, label="Относительная плотность")
     
-    # 2D potential colormap (middle-right)
-    ax4 = Axis(fig[2, 2], title="Potential Distribution (Φ(X,Y) for Z=0)", 
-              xlabel="X (AU)", ylabel="Y (AU)")
+    # 2D тепловая карта потенциала (в центре справа)
+    ax4 = Axis(fig[2, 2], title="Распределение потенциала (Φ(X,Y) для Z=0)", 
+              xlabel="X (а.е.)", ylabel="Y (а.е.)")
     hm2 = heatmap!(ax4, x_values, y_values, phi_xy, colormap=:viridis)
-    Colorbar(fig[2, 2, Right()], hm2, label="Potential")
-    # Set manual ticks to avoid warnings
-    ax4.xticks = LinearTicks(5)
+    Colorbar(fig[2, 2, Right()], hm2, label="Потенциал")
+    ax4.xticks = LinearTicks(5)  # Улучшение отображения осей
     ax4.yticks = LinearTicks(5)
     
-    # Prepare 3D data
-    # Get ranges for 3D visualization
+    # Подготовка данных для 3D визуализации
+    z_range = collect(z_coords)
     x_range = x_values
     y_range = y_values
-    z_range = collect(z_coords)
     
-    # Extract 3D data and normalize for visualization
+    # Извлечение и нормализация 3D данных для визуализации
+    # Нормализуем значения от 0 до 1 для лучшего отображения контуров
     norm_rho = state.Rho[2:end-1, 2:end-1, 2:end-1]
-    min_rho = minimum(norm_rho)
-    max_rho = maximum(norm_rho)
+    min_rho, max_rho = extrema(norm_rho)
     norm_rho = (norm_rho .- min_rho) ./ (max_rho - min_rho)
     
     norm_phi = state.Phi[2:end-1, 2:end-1, 2:end-1]
-    min_phi = minimum(norm_phi)
-    max_phi = maximum(norm_phi)
+    min_phi, max_phi = extrema(norm_phi)
     norm_phi = (norm_phi .- min_phi) ./ (max_phi - min_phi)
     
-    # Get min and max values for each dimension
+    # Получение границ области для 3D визуализации
     x_min, x_max = extrema(x_range)
     y_min, y_max = extrema(y_range)
     z_min, z_max = extrema(z_range)
     
-    # Define contour levels and colors
-    density_levels = [0.1, 0.3, 0.5, 0.7, 0.9]
-    potential_levels = [0.1, 0.3, 0.5, 0.7, 0.9]
-    contour_colors = [:orange, :red, :purple, :blue, :cyan]
+    # Определение уровней контуров и цветов для 3D визуализации
+    density_levels = [0.1, 0.3, 0.5, 0.7, 0.9]  # Уровни контуров плотности
+    potential_levels = [0.1, 0.3, 0.5, 0.7, 0.9]  # Уровни контуров потенциала
+    contour_colors = [:orange, :red, :purple, :blue, :cyan]  # Цвета контуров
     
-    # 3D density contour plot (bottom-left)
-    ax5 = Axis3(fig[3, 1], title="Density Contours (3D)", 
-               xlabel="X (AU)", ylabel="Y (AU)", zlabel="Z (AU)")
+    # 3D контурный график плотности (внизу слева)
+    ax5 = Axis3(fig[3, 1], title="Контуры плотности (3D)", 
+               xlabel="X (а.е.)", ylabel="Y (а.е.)", zlabel="Z (а.е.)")
     
+    # Построение контурных поверхностей плотности для разных уровней
     for (i, level) in enumerate(density_levels)
         contour!(ax5, (x_min, x_max), (y_min, y_max), (z_min, z_max), norm_rho,
                 levels=[level],
@@ -356,13 +446,14 @@ function visualize_results(state::SimulationState, constants::SimulationConstant
                 linewidth=0.5)
     end
     
-    # Set camera position and manual ticks
+    # Настройка камеры для 3D визуализации плотности
     cam3d!(ax5.scene, eyeposition=Vec3f(2.5, 2.5, 2.5), lookat=Vec3f(0, 0, 0))
     
-    # 3D potential contour plot (bottom-right)
-    ax6 = Axis3(fig[3, 2], title="Potential Contours (3D)",
-               xlabel="X (AU)", ylabel="Y (AU)", zlabel="Z (AU)")
+    # 3D контурный график потенциала (внизу справа)
+    ax6 = Axis3(fig[3, 2], title="Контуры потенциала (3D)",
+               xlabel="X (а.е.)", ylabel="Y (а.е.)", zlabel="Z (а.е.)")
     
+    # Построение контурных поверхностей потенциала для разных уровней
     for (i, level) in enumerate(potential_levels)
         contour!(ax6, (x_min, x_max), (y_min, y_max), (z_min, z_max), norm_phi,
                 levels=[level],
@@ -372,19 +463,21 @@ function visualize_results(state::SimulationState, constants::SimulationConstant
                 linewidth=0.5)
     end
     
-    # Set camera position and manual ticks
+    # Настройка камеры для 3D визуализации потенциала
     cam3d!(ax6.scene, eyeposition=Vec3f(2.5, 2.5, 2.5), lookat=Vec3f(0, 0, 0))
     
-    # Add simulation parameters as text
-    Label(fig[0, :], "Cloud Model Simulation Results",
+    # Добавление заголовка и подписи с параметрами симуляции
+    Label(fig[0, :], "Результаты симуляции модели облака",
           fontsize=20)
-    param_text = "Grid: $(N)³ | Iterations: $n_iterations | Max Distance: $(round(ustrip(Float64, u"AU", size * u"m"), digits=2)) AU | Mass: $(round(ustrip(Float64, u"Msun", 1000 * state.M * u"kg"), digits=2)) 1e-3 Msun"
+    param_text = "Сетка: $(N)³ | Итерации: $n_iterations | " * 
+                 "Макс. расстояние: $(ustrip(Float64, u"AU", size * u"m")) а.е. | " * 
+                 "Масса: $(ustrip(Float64, u"Msun", 1000 * state.M * u"kg")) Msun"
     Label(fig[4, :], param_text, fontsize=16)
     
-    # Save figure to file
+    # Сохранение фигуры в файл PNG
     filename = "$(output_prefix)_$(N)_$(n_iterations)_$(ustrip(Float64, u"AU", size * u"m")).png"
     save(filename, fig)
-    println("Visualization saved to file $filename")
+    println("Визуализация сохранена в файл $filename")
     
     return fig
 end
@@ -392,18 +485,23 @@ end
 """
     parse_command_line()
 
-Parse command line arguments for the cloud model.
+Разбор аргументов командной строки для настройки параметров симуляции облака.
 
-# Returns
-- `Tuple`: (iterations, grid_size, max_dist, use_standard)
+Эта функция обрабатывает следующие аргументы командной строки:
+- `--iterations=N`: Установка количества итераций симуляции
+- `--N=N`: Установка размера сетки (количества точек по каждому измерению)
+- `--size=N`: Установка физического размера области моделирования в астрономических единицах
+
+# Возвращает
+- `Tuple{Int, Int, Float64}`: Кортеж (iterations, N, size) с параметрами симуляции
 """
 function parse_command_line()
-    # Default values
-    iterations = 1000
-    N = 50
-    size = 40.0
+    # Значения параметров по умолчанию
+    iterations = 1000  # Количество итераций
+    N = 50            # Размер сетки
+    size = 40.0       # Размер области в а.е.
     
-    # Process arguments
+    # Обработка аргументов командной строки
     for arg in ARGS
         if startswith(arg, "--iterations=")
             iterations = parse(Int, split(arg, "=")[2])
@@ -418,81 +516,88 @@ function parse_command_line()
 end
 
 """
-    run_simulation(; n_iterations=1000, size=40, N=50, verbose=true, M=1e-3, T=50, rho_0=6e-17, mu=2.35e-3)
+    run_simulation(; n_iterations=1000, size=40.0, N=50, verbose=true, 
+                  T=50.0, rho_0=6e-17, mu=2.35e-3)
 
-Run the cloud model simulation with specified parameters.
+Запуск полной симуляции модели газового облака с указанными параметрами.
 
-# Arguments
-- `n_iterations::Int`: Number of iterations to run (default: 1000)
-- `size::Float64`: Size of the simulation domain in AU (default: 40)
-- `N::Int`: Number of grid points per dimension (default: 50)
-- `verbose::Bool`: Whether to print progress information (default: true)
-- `M::Float64`: Mass of the cloud in solar masses (default: 1e-3)
-- `T::Float64`: Temperature of the cloud in Kelvin (default: 50)
-- `rho_0::Float64`: Initial density of the cloud in kg/m³ (default: 6e-17)
-- `mu::Float64`: Average molecular mass in kg/mol (default: 2.35e-3)
+Эта функция выполняет полный цикл симуляции газового облака, включая инициализацию
+начального состояния и итеративное решение связанной системы уравнений для 
+гравитационного потенциала и плотности. Симуляция выполняется в многопоточном режиме,
+что значительно ускоряет вычисления на многоядерных системах.
 
-# Returns
-- `SimulationState`: Final state of the simulation after all iterations
+# Аргументы
+- `n_iterations::Int`: Количество итераций для выполнения (по умолчанию: 1000)
+- `size::Real`: Размер области симуляции в астрономических единицах (по умолчанию: 40.0)
+- `N::Int`: Количество точек сетки по каждому измерению (по умолчанию: 50)
+- `verbose::Bool`: Выводить ли информацию о прогрессе симуляции (по умолчанию: true)
+- `T::Float64`: Температура облака в Кельвинах (по умолчанию: 50.0)
+- `rho_0::Float64`: Начальная плотность облака в кг/м³ (по умолчанию: 6e-17)
+- `mu::Float64`: Средняя молекулярная масса газа в кг/моль (по умолчанию: 2.35e-3)
+
+# Возвращает
+- `Tuple{SimulationState, SimulationConstants}`: Финальное состояние симуляции и константы
 """
 function run_simulation(;
-        n_iterations=1000::Int, 
-        size=40.0::Real, 
-        N=50::Int, 
-        verbose=true::Bool, 
-        T=50.0,           #K
-        rho_0=6e-17,    #kg/m^3
-        mu=2.35e-3,     #kg/mol
+        n_iterations::Int=1000, 
+        size::Real=40.0, 
+        N::Int=50, 
+        verbose::Bool=true, 
+        T::Float64=50.0,        # Температура облака (K)
+        rho_0::Float64=6e-17,   # Плотность облака (kg/m^3)
+        mu::Float64=2.35e-3,    # Молекулярная масса (kg/mol)
         )
+    
+    # Инициализация структуры констант симуляции с преобразованием единиц
     constants = SimulationConstants(
-        ustrip(T * u"K" |> upreferred),                     # Temperature in K
-        ustrip(rho_0 * u"kg/m^3" |> upreferred),            # Density in kg/m^3
-        ustrip(mu * u"kg/mol" |> upreferred),               # Molar mass in kg/mol
-        ustrip(size * u"AU" / N |> upreferred),             # Step in meters
-        N,                                                  # Number of grid points
+        ustrip(T * u"K" |> upreferred),                    # Температура в K
+        ustrip(rho_0 * u"kg/m^3" |> upreferred),           # Плотность в kg/m^3
+        ustrip(mu * u"kg/mol" |> upreferred),              # Молярная масса в kg/mol
+        ustrip(size * u"AU" / N |> upreferred),            # Шаг сетки в метрах
+        N,                                                 # Количество точек сетки
     )
-    # Initialize simulation components
+    
+    # Инициализация начального состояния симуляции
     state = initialize_simulation_state(
-        ustrip(Float64, u"m", size * u"AU"), #size in meters
+        ustrip(Float64, u"m", size * u"AU"),  # Размер области в метрах
         constants
     )
     
-    # Run iteration loop
+    # Запуск цикла итераций
     if verbose
         println("Запуск многопоточного итерационного моделирования...")
         println("Размер сетки: $N, Итераций: $n_iterations, Потоков: $(nthreads())")
     end
     
-    for iter in 1:n_iterations
-        # Update state using iterative method with multithreading
+    # Основной цикл итераций симуляции с индикатором прогресса
+    for iter in ProgressBar(1:n_iterations)
+        # Выполняем одну итерацию метода для обновления потенциала и плотности
         iterations_method!(state, constants)
-
-        # Avoid division by zero for progress reporting
-        if verbose && iter % max(1, n_iterations ÷ 20) == 0
-            println("  Завершено итераций $iter из $n_iterations")
-        end
+        
+        # В режиме verbose не нужны дополнительные сообщения, так как ProgressBar уже показывает прогресс
     end
     
     if verbose
-        println("Моделирование завершено!")
+        println("Моделирование завершено! Общая масса облака: $(round(ustrip(Float64, u"Msun", state.M * u"kg"), digits=6)) Msun")
     end
     
     return state, constants
 end
 
 end 
-# Main entry point if this file is executed directly
+# Точка входа для запуска скрипта напрямую из командной строки
 if abspath(PROGRAM_FILE) == @__FILE__
-    # Parse command line arguments
+    # Разбор аргументов командной строки для получения параметров симуляции
     global iterations, N, size = CloudModel.parse_command_line()
     
-
-    println("Запуск моделирования с параметрами:")
-    println("  Размер сетки: $(N)×$(N)×$(N)")
-    println("  Размер области: $(size)а.е.x$(size)а.е.x$(size)а.е.")
-    println("  Итераций: $iterations")
+    # Вывод информации о параметрах запуска
+    println("Запуск моделирования газового облака с параметрами:")
+    println("  Размер сетки: $(N)×$(N)×$(N) точек")
+    println("  Размер области: $(size) а.е. × $(size) а.е. × $(size) а.е.")
+    println("  Количество итераций: $iterations")
+    println("  Количество потоков: $(Threads.nthreads())")
     
-    println("  Метод: Многопоточный Итерационный ($(Threads.nthreads()) потоков)")
+    # Запуск симуляции с указанными параметрами и визуальным индикатором прогресса
     state, constants = CloudModel.run_simulation(
         n_iterations=iterations, 
         size=size, 
@@ -500,10 +605,12 @@ if abspath(PROGRAM_FILE) == @__FILE__
         verbose=true
     )
 
-    # Visualize results with all parameters
-    println("Моделирование завершено. Визуализация результатов...")
+    # Визуализация результатов симуляции
+    println("Моделирование завершено. Выполняется визуализация результатов...")
     CloudModel.visualize_results(
         state, constants,
         n_iterations=iterations,
     )
+    
+    println("Визуализация завершена. Расчет выполнен с использованием $(Threads.nthreads()) потоков.")
 end

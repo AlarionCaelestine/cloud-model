@@ -32,6 +32,44 @@ CloudModel - это комплексная реализация гравитац
 - Комплексная визуализация результатов в 1D, 2D и 3D представлениях
 - Удобный интерфейс запуска из командной строки с настраиваемыми параметрами
 
+## Быстрая установка и запуск
+
+### Метод 1: Прямой запуск (рекомендуется)
+Просто клонируйте репозиторий и запустите скрипт:
+
+```bash
+git clone https://github.com/AlarionCaelestine/cloud-model.git
+cd cloud-model
+./run_model.jl
+```
+
+Или с параметрами:
+```bash
+./run_model.jl --iterations=5000 --N=100 --size=50
+```
+
+### Метод 2: Установка как пакет Julia
+Для установки модуля как пакет Julia выполните:
+
+```bash
+git clone https://github.com/AlarionCaelestine/cloud-model.git
+cd cloud-model
+julia install.jl
+```
+
+После установки вы можете запустить модель из командной строки:
+```bash
+export PATH="$PATH:$HOME/.julia/bin"
+cloud_model --iterations=1000 --N=50 --size=40
+```
+
+Или использовать в коде Julia:
+```julia
+using CloudModel
+state, constants = run_simulation()
+visualize_results(state, constants)
+```
+
 ## Установка и требования
 
 ### Системные требования

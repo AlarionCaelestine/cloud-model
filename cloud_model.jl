@@ -475,7 +475,11 @@ function visualize_results(state::SimulationState, constants::SimulationConstant
     Label(fig[4, :], param_text, fontsize=16)
     
     # Сохранение фигуры в файл PNG
-    filename = "$(output_prefix)_$(N)_$(n_iterations)_$(ustrip(Float64, u"AU", size * u"m")).png"
+    # Создаем директорию visualizations, если она не существует
+    isdir("visualizations") || mkdir("visualizations")
+    
+    # Формируем имя файла и сохраняем в директорию visualizations/
+    filename = "visualizations/$(output_prefix)_$(N)_$(n_iterations)_$(ustrip(Float64, u"AU", size * u"m")).png"
     save(filename, fig)
     println("Визуализация сохранена в файл $filename")
     

@@ -159,7 +159,7 @@ function initialize_simulation_state(size::Float64, constants::SimulationConstan
     M = constants.rho_0 * size^3 * 8
     
     # Установка постоянной начальной плотности во всем облаке
-    Rho[1:end-1, 1:end-1, 1:end-1] .= constants.rho_0
+    Rho[1:end, 1:end, 1:end] .= constants.rho_0
     
     # Инициализация начального гравитационного потенциала
     # с использованием предварительно рассчитанных расстояний до центра
@@ -271,7 +271,7 @@ function iterations_method!(state::SimulationState, constants::SimulationConstan
                 state.Rho[i,j,k] = constants.rho_0 * exp(-Phi2[i,j,k] * B)
                 
                 # Накопление локальной массы (8 - коэффициент для расчета объема ячейки)
-                local_sum += 8 * state.Rho[i,j,k] * constants.Step^3
+                local_sum += state.Rho[i,j,k] 
             end
         end
         # Сохраняем локальную сумму для текущего потока
@@ -282,7 +282,7 @@ function iterations_method!(state::SimulationState, constants::SimulationConstan
     state.Phi .= Phi2
     
     # Обновляем общую массу облака суммированием локальных сумм
-    state.M = sum(local_sums)
+    state.M = sum(local_sums) * 8 * constants.Step^3
     
     return state
 end
@@ -369,18 +369,18 @@ function visualize_results(state::SimulationState, constants::SimulationConstant
     state.Rho = state.Rho ./ constants.rho_0  # Нормализация плотности для визуализации
     
     # Создание диапазонов координат в астрономических единицах для визуализации
-    x_coords = range(0, ustrip(Float64, u"AU", size * u"m"), length=N)
-    y_coords = range(0, ustrip(Float64, u"AU", size * u"m"), length=N)
-    z_coords = range(0, ustrip(Float64, u"AU", size * u"m"), length=N)
+    x_coords = range(0, ustrip(Float64, u"AU", size * u"m"), length=N + 1)
+    y_coords = range(0, ustrip(Float64, u"AU", size * u"m"), length=N + 1)
+    z_coords = range(0, ustrip(Float64, u"AU", size * u"m"), length=N + 1)
     
     # Извлечение одномерных срезов для плотности и потенциала вдоль оси X при Y=0, Z=0
     x_values = collect(x_coords)
-    rho_1d = state.Rho[2:end-1, 1, 1]  # Плотность вдоль оси X
-    phi_1d = state.Phi[2:end-1, 1, 1]  # Потенциал вдоль оси X
+    rho_1d = state.Rho[2:end, 1, 1]  # Плотность вдоль оси X
+    phi_1d = state.Phi[2:end, 1, 1]  # Потенциал вдоль оси X
     
     # Извлечение двумерных срезов для плоскости Z=0
-    rho_xy = state.Rho[2:end-1, 2:end-1, 1]  # Срез плотности в плоскости XY
-    phi_xy = state.Phi[2:end-1, 2:end-1, 1]  # Срез потенциала в плоскости XY
+    rho_xy = state.Rho[2:end, 2:end, 1]  # Срез плотности в плоскости XY
+    phi_xy = state.Phi[2:end, 2:end, 1]  # Срез потенциала в плоскости XY
     
     # 1D график плотности (в верхнем левом углу)
     ax1 = Axis(fig[1, 1], title="Распределение плотности (ρ(X) для Y=0, Z=0)", 
@@ -414,11 +414,11 @@ function visualize_results(state::SimulationState, constants::SimulationConstant
     
     # Извлечение и нормализация 3D данных для визуализации
     # Нормализуем значения от 0 до 1 для лучшего отображения контуров
-    norm_rho = state.Rho[2:end-1, 2:end-1, 2:end-1]
+    norm_rho = state.Rho[2:end, 2:end, 2:end]
     min_rho, max_rho = extrema(norm_rho)
     norm_rho = (norm_rho .- min_rho) ./ (max_rho - min_rho)
     
-    norm_phi = state.Phi[2:end-1, 2:end-1, 2:end-1]
+    norm_phi = state.Phi[2:end, 2:end, 2:end]
     min_phi, max_phi = extrema(norm_phi)
     norm_phi = (norm_phi .- min_phi) ./ (max_phi - min_phi)
     

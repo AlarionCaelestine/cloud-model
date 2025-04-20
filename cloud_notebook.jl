@@ -83,12 +83,12 @@ md"""
 
 # ╔═╡ 52f13ab8-e3b3-47bd-b6f8-8836ba24cfac
 begin
-	size = 50u"AU"
+	size = 1u"AU"
 	N = 100
 end;
 
 # ╔═╡ 35ffaf0f-007e-4c38-bbbb-5ff5888785c9
-n_iterations = 1_000
+n_iterations = 1000
 
 # ╔═╡ 4678b6e3-9923-4238-8338-a9fb4c783ecb
 md"""
@@ -104,7 +104,8 @@ begin
 
 # Поля
 - `T::Float64`: Температура облака (K)
-- `rho_0::Float64`: Начальная плотность облака (kg/m^3)
+- `rho_0::Float64`: Плотность вокруг облака (kg/m^3)
+- `rho_c::Float64`: Плотность в центре облака (kg/m^3)
 - `mu::Float64`: Средняя молекулярная масса газа (kg/mol)
 - `Step::Float64`: Шаг пространственной сетки (m)
 - `N::Int`: Количество точек сетки по одному измерению
@@ -112,7 +113,8 @@ begin
 """
 struct SimulationConstants
     T::Float64          # Температура облака (K)
-    rho_0::Float64      # Начальная плотность облака (kg/m^3)
+    rho_0::Float64      # Плотность вокруг облака (kg/m^3)
+	rho_c::Float64      # Плотность в центре облака (kg/m^3)
     mu::Float64         # Средняя молекулярная масса газа (kg/mol)
     Step::Float64       # Шаг пространственной сетки (m)
     N::Int              # Количество точек сетки по одному измерению
@@ -127,6 +129,7 @@ end
 # Аргументы
 - `T::Float64`: Температура облака (K)
 - `rho_0::Float64`: Начальная плотность облака (kg/m^3)
+- `rho_c::Float64`: Плотность в центре облака (kg/m^3)
 - `mu::Float64`: Средняя молекулярная масса (kg/mol)
 - `Step::Float64`: Шаг пространственной сетки (m)
 - `N::Int`: Количество точек сетки по одному измерению
@@ -134,7 +137,7 @@ end
 # Возвращает
 - `SimulationConstants`: Структура с константами симуляции и рассчитанными расстояниями
 """
-function SimulationConstants(T::Float64, rho_0::Float64, mu::Float64, Step::Float64, N::Int)
+function SimulationConstants(T::Float64, rho_0::Float64, rho_c::Float64, mu::Float64, Step::Float64, N::Int)
     # Расчет расстояний от каждой точки сетки до центра
     # Центр облака размещен в точке (1.5, 1.5, 1.5) в индексах сетки
     distance_to_center = [sqrt((i - 1.5)^2 + (j-1.5)^2 + (k-1.5)^2) * Step for i in 1:(N+2), j in 1:(N+2), k in 1:(N+2)]
@@ -146,6 +149,7 @@ end
 constants = SimulationConstants(
         ustrip(Float64, u"K", 50u"K"),              # Температура в K
         ustrip(Float64, u"kg/m^3", 6e-17u"kg/m^3"), # Плотность в kg/m^3
+	    ustrip(Float64, u"kg/m^3", 1.3e-9u"kg/m^3"), # Плотность в kg/m^3
         ustrip(Float64, u"kg/mol", 2.35u"g/mol"),   # Молярная масса в kg/mol
         ustrip(Float64, u"m", size / N),            # Шаг сетки в метрах
         N,                                          # Количество точек сетки
@@ -202,11 +206,11 @@ function initialize_simulation_state(size::Float64, constants::SimulationConstan
     Rho = fill(0.0, constants.N+2, constants.N+2, constants.N+2)
 
     # Расчет общей массы облака (размер^3 * 8 октантов * плотность)
-    M = constants.rho_0 * size^3 * 8
-    
+    M = (constants.rho_0 + constants.rho_c) / 2 * (constants.Step * constants.N)^3 * 8
     # Установка постоянной начальной плотности во всем облаке
-    Rho[1:end, 1:end, 1:end] .= constants.rho_0
-    
+	Rho[1:end, 1:end, 1:end] .= constants.rho_0
+    Rho[1:2,1:2,1:2] .= constants.rho_c
+	
     # Инициализация начального гравитационного потенциала
     # с использованием предварительно рассчитанных расстояний до центра
     for i in 1:(constants.N+2)
@@ -217,6 +221,8 @@ function initialize_simulation_state(size::Float64, constants::SimulationConstan
             end
         end
     end
+	B = constants.mu / R / constants.T
+    Phi[1:2,1:2,1:2] .= - log(constants.rho_c / constants.rho_0) / B 
     
     return SimulationState(Phi, Rho, M, 0)
 end
@@ -262,7 +268,7 @@ function boundary_conditions!(state::SimulationState, constants::SimulationConst
     for i in 1:(constants.N+2)
         for j in 1:(constants.N+2)
             # Расчет потенциала на основе текущей массы облака
-            x = -G * state.M / constants.distance_to_center[i, j, constants.N+2]
+            x = G * state.M / constants.distance_to_center[i, j, constants.N+2]
             # Применение граничных условий для трех граничных плоскостей
             state.Phi[i, j, constants.N+2] = x
             state.Phi[i, constants.N+2, j] = x
@@ -302,8 +308,8 @@ function iterations_method!(state::SimulationState, constants::SimulationConstan
     # Расчет константы B для барометрического уравнения: B = μ/(RT)
     # Эта константа определяет, насколько быстро падает плотность с ростом потенциала
     B = constants.mu / R / constants.T
-    
-    # Копируем текущий потенциал для расчета обновленных значений
+
+	# Копируем текущий потенциал для расчета обновленных значений
     # (Метод Якоби требует использования значений с предыдущей итерации)
     Phi2 = copy(state.Phi)
     
@@ -315,6 +321,7 @@ function iterations_method!(state::SimulationState, constants::SimulationConstan
         local_sum = 0.0  # Локальная сумма массы для текущего потока
         for j in 2:constants.N+1
             for i in 2:constants.N+1
+				if !(k == 2 && j == 2 && i == 2)
                 # Дискретизация уравнения Пуассона (∇²Φ = 4πGρ) по 7-точечному шаблону
                 # ∇²Φ ≈ (Φᵢ₊₁,ⱼ,ₖ + Φᵢ₋₁,ⱼ,ₖ + Φᵢ,ⱼ₊₁,ₖ + Φᵢ,ⱼ₋₁,ₖ + Φᵢ,ⱼ,ₖ₊₁ + Φᵢ,ⱼ,ₖ₋₁ - 6Φᵢ,ⱼ,ₖ)/(Δx)²
                 Phi2[i,j,k] = (
@@ -324,10 +331,10 @@ function iterations_method!(state::SimulationState, constants::SimulationConstan
                     factor * state.Rho[i,j,k]
                 ) / 6
                 
-                # Обновление плотности по барометрическому уравнению: ρ = ρ₀·exp(-Φμ/RT)
-                state.Rho[i,j,k] = constants.rho_0 * exp(-Phi2[i,j,k] * B)
-                
-                # Накопление локальной массы (8 - коэффициент для расчета объема ячейки)
+                # Обновление плотности по барометрическому уравнению: ρ = ρ_c·exp(-Φμ/RT)
+                state.Rho[i,j,k] = constants.rho_c * exp(-Phi2[i,j,k] * B)
+				end
+                # Накопление локальной массы 
                 local_sum += state.Rho[i,j,k] 
             end
         end
@@ -339,7 +346,7 @@ function iterations_method!(state::SimulationState, constants::SimulationConstan
     state.Phi .= Phi2
     
     # Обновляем общую массу облака суммированием локальных сумм
-    state.M = sum(local_sums) * 8 * constants.Step^3
+    state.M = (sum(local_sums)) * 8 * constants.Step^3 
     state.iterations_done += 1
     return state
 end
@@ -418,7 +425,7 @@ end
 - `Figure`: Созданный объект фигуры для дальнейшего использования
 """
 function visualize_results(state::SimulationState, constants::SimulationConstants; 
-                           output_prefix="cloud_model",
+                           output_prefix="cloud_model", saving::Bool=false
 )
 	n_iterations = state.iterations_done
     # Создание фигуры с 3 строками, 2 столбцами для размещения всех графиков
@@ -533,18 +540,19 @@ function visualize_results(state::SimulationState, constants::SimulationConstant
           fontsize=20)
     param_text = "Сетка: $(N)³ | Итерации: $n_iterations | " * 
                  "Макс. расстояние: $(ustrip(Float64, u"AU", size * u"m")) а.е. | " * 
-                 "Масса: $(ustrip(Float64, u"Msun", 1000 * state.M * u"kg")) Msun"
+                 "Масса: $(ustrip(Float64, u"Msun", state.M * u"kg")) Msun"
     Label(fig[4, :], param_text, fontsize=16)
-    
-    # Сохранение фигуры в файл PNG
-    # Создаем директорию visualizations, если она не существует
-    isdir("visualizations") || mkdir("visualizations")
-    
-    # Формируем имя файла и сохраняем в директорию visualizations/
-    filename = "visualizations/$(output_prefix)_$(N)_$(n_iterations)_$(ustrip(Float64, u"AU", size * u"m")).png"
-    save(filename, fig)
-    println("Визуализация сохранена в файл $filename")
-    
+
+	if saving
+	    # Сохранение фигуры в файл PNG
+	    # Создаем директорию visualizations, если она не существует
+	    isdir("visualizations") || mkdir("visualizations")
+	    
+	    # Формируем имя файла и сохраняем в директорию visualizations/
+	    filename = "visualizations/$(output_prefix)_$(N)_$(n_iterations)_$(ustrip(Float64, u"AU", size * u"m")).png"
+	    save(filename, fig)
+	    println("Визуализация сохранена в файл $filename")
+	end
     return fig
 end
 
@@ -2188,10 +2196,10 @@ version = "1.4.1+2"
 # ╟─4678b6e3-9923-4238-8338-a9fb4c783ecb
 # ╟─0f8887b5-9275-4ead-87ec-1ae86a10eeba
 # ╟─39397166-7cfc-461c-bcea-95ef3b9e20b4
-# ╟─e4ee9b7e-9061-4c3b-baa8-d4d8f8d16699
-# ╟─c6fffa13-d5e1-4541-b582-e63f95c886b0
+# ╠═e4ee9b7e-9061-4c3b-baa8-d4d8f8d16699
+# ╠═c6fffa13-d5e1-4541-b582-e63f95c886b0
 # ╟─dbc831ca-6292-4101-b6d0-92057fdca0cb
 # ╟─3670aa21-141f-4236-823b-52f2b9fef4f7
-# ╟─c88a84a5-6b85-4ff9-959f-9b1e9287047f
+# ╠═c88a84a5-6b85-4ff9-959f-9b1e9287047f
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
